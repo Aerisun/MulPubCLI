@@ -121,7 +121,7 @@ def _cmd_login(args, store: StorageLayout) -> int:
                 client.save(cred_path)
             else:
                 # Start or refresh QR
-                if args.refresh and cred_path.exists():
+                if cred_path.exists():
                     client = _load_client(platform, store)
                 else:
                     client = _new_client(platform)
@@ -164,14 +164,14 @@ def _xhs_login(args, store: StorageLayout) -> int:
                     result = client.confirm_sms(code)
                 else:
                     phone = input("请输入手机号（含国家码，如 +86 138...）: ").strip()
-                    client = XHSLogin(cred_path, source=ref)
+                    client = XHSLogin.load(cred_path, source=ref) if cred_path.exists() else XHSLogin(cred_path, source=ref)
                     result = client.send_sms(phone)
             else:
                 if args.poll:
                     client = XHSLogin.load(cred_path, source=ref) if cred_path.exists() else XHSLogin(cred_path, source=ref)
                     result = client.poll_login()
                 else:
-                    client = XHSLogin(cred_path, source=ref)
+                    client = XHSLogin.load(cred_path, source=ref) if cred_path.exists() else XHSLogin(cred_path, source=ref)
                     out = client.start_login(qr_path)
                     result = out if isinstance(out, dict) else {
                         "status": "waiting",
