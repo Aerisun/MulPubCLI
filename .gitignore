@@ -1,0 +1,12 @@
+# 内部存储（凭证、二维码、发布记录）
+.storage/
+test_article/
+
+# Python
+*.pyc
+__pycache__/
+*.egg-info/
+dist/
+build/
+.venv/
+*.lock
