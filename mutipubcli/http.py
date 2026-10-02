@@ -49,7 +49,15 @@ class HTTPFailure(RuntimeError):
 class HTTP:
     def __init__(self, hosts: set[str], *, session=None, on_response=None):
         self.hosts = hosts
-        self.session = session if session is not None else requests.Session()
+        if session is not None:
+            self.session = session
+        else:
+            try:
+                from curl_cffi import requests as crequests
+                self.session = crequests.Session(impersonate="chrome124")
+            except ImportError:
+                self.session = requests.Session()
+        self.on_response = on_response
         self.on_response = on_response
 
     def request(self, method: str, url: str, *, accepted_statuses=None, **kwargs):

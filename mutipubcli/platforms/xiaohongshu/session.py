@@ -26,6 +26,36 @@ def load_source(source: Path) -> Path:
         raise ValueError(f'小红书签名源码版本不匹配或已被修改，请删除 {source} 后重试')
     if str(source) not in sys.path:
         sys.path.insert(0, str(source))
+        
+    # Monkey-patch 'requests' with curl_cffi for XHS api camouflage
+    try:
+        from curl_cffi import requests as crequests
+        class PatchedRequests:
+            @staticmethod
+            def get(*args, **kwargs):
+                kwargs.setdefault('impersonate', 'chrome124')
+                return crequests.get(*args, **kwargs)
+            @staticmethod
+            def post(*args, **kwargs):
+                kwargs.setdefault('impersonate', 'chrome124')
+                return crequests.post(*args, **kwargs)
+            @staticmethod
+            def request(*args, **kwargs):
+                kwargs.setdefault('impersonate', 'chrome124')
+                return crequests.request(*args, **kwargs)
+            @staticmethod
+            def Session(*args, **kwargs):
+                kwargs.setdefault('impersonate', 'chrome124')
+                return crequests.Session(*args, **kwargs)
+            
+            # Forward everything else to crequests
+            def __getattr__(self, name):
+                return getattr(crequests, name)
+                
+        sys.modules['requests'] = PatchedRequests()
+    except ImportError:
+        pass
+        
     return source
 
 
