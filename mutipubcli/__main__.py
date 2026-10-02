@@ -151,7 +151,7 @@ def _xhs_login(args, store: StorageLayout) -> int:
     qr_path   = store.qr_image(platform)
     method    = getattr(args, "method", "qr")
 
-    from .platforms.xiaohongshu.login import XHSLogin
+    from .platforms.xiaohongshu.login import XHSPCLogin as XHSLogin
 
     client = None
     try:
@@ -178,8 +178,7 @@ def _xhs_login(args, store: StorageLayout) -> int:
                         "qr_image": str(qr_path),
                         "message": "请用小红书 App 扫描二维码，扫完后执行: mutipubcli login xiaohongshu --poll",
                     }
-            if client:
-                client.save(cred_path)
+                client.save()
     except (FileNotFoundError, PermissionError, ValueError) as exc:
         _out({"status": "error", "message": str(exc)})
         return 1
