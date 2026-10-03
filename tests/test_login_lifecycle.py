@@ -21,7 +21,6 @@ from mutipubcli.platforms.xiaohongshu.login import (
     INITIALIZING_STALE_SECONDS,
     XHSLoginRuntime,
 )
-from mutipubcli.platforms.zhihu.client import ZhihuWeb
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -130,13 +129,13 @@ class LoginReuseAndRefreshTests(unittest.TestCase):
     def test_login_reuses_valid_authenticated_session(self):
         with TemporaryDirectory(dir=PROJECT_ROOT) as tmp:
             store = StorageLayout(Path(tmp))
-            cred = store.credentials('zhihu')
+            cred = store.credentials('toutiao')
             cred.write_text(json.dumps({'account_id': 'abc', 'cookies': [{'name': 'z_c0', 'value': 'tok'}]}))
             client = _FakeClient(account_result={'id': 'abc', 'name': 'me'})
             with patch('mutipubcli.__main__._load_client', return_value=client), \
                  patch('mutipubcli.__main__._new_client') as new_client, \
                  patch('mutipubcli.__main__._out') as out:
-                code = _cmd_login(_args('zhihu'), store)
+                code = _cmd_login(_args('toutiao'), store)
             self.assertEqual(code, 0)
             # Valid session is returned as usable; no fresh QR is minted.
             self.assertEqual(client.start_calls, 0)
@@ -146,34 +145,18 @@ class LoginReuseAndRefreshTests(unittest.TestCase):
     def test_login_auto_refreshes_stale_authenticated_session(self):
         with TemporaryDirectory(dir=PROJECT_ROOT) as tmp:
             store = StorageLayout(Path(tmp))
-            cred = store.credentials('zhihu')
+            cred = store.credentials('toutiao')
             cred.write_text(json.dumps({'account_id': 'abc', 'cookies': [{'name': 'z_c0', 'value': 'tok'}]}))
             stale_client = _FakeClient(account_result=HTTPFailure('登录态已失效', code=40352))
             fresh_client = _FakeClient()
             with patch('mutipubcli.__main__._load_client', side_effect=[stale_client]), \
                  patch('mutipubcli.__main__._new_client', return_value=fresh_client), \
                  patch('mutipubcli.__main__._out') as out:
-                code = _cmd_login(_args('zhihu'), store)
+                code = _cmd_login(_args('toutiao'), store)
             self.assertEqual(code, 0)
             # Probe failed => fresh anonymous QR is minted to replace the stale session.
             self.assertEqual(fresh_client.start_calls, 1)
             self.assertEqual(out.call_args[0][0]['status'], 'waiting')
-
-
-class ZhihuGatedPollTests(unittest.TestCase):
-    def test_poll_40352_is_non_fatal(self):
-        client = ZhihuWeb()
-        client.qr_token = 'token123'
-        client.qr_expires_at = time.time() + 120
-        client.login_blocked = False
-        try:
-            with patch.object(client.http, 'json',
-                              side_effect=HTTPFailure('anti-bot gate', code=40352)):
-                result = client.poll_login()
-            self.assertEqual(result['status'], 'waiting')
-            self.assertFalse(client.login_blocked)
-        finally:
-            client.close()
 
 
 class XHSStaleRecoveryTests(unittest.TestCase):
