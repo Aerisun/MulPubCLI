@@ -32,7 +32,7 @@ PLATFORMS = ("xiaohongshu", "zhihu", "toutiao")
 # Platform client factory
 # ─────────────────────────────────────────────
 
-def _load_client(platform: str, store: StorageLayout):
+def _load_client(platform: str, store: StorageLayout, *, proxy: str | None = None):
     """Load a platform client from saved credentials. Raises if credentials missing."""
     path = store.credentials(platform)
     if not path.is_file():
@@ -43,26 +43,47 @@ def _load_client(platform: str, store: StorageLayout):
         raise PermissionError(f"凭证文件权限过宽，请修为 600：{path}")
     if platform == "zhihu":
         from .platforms.zhihu.client import ZhihuWeb
-        return ZhihuWeb.load(path)
-    if platform == "toutiao":
+        client = ZhihuWeb.load(path)
+    elif platform == "toutiao":
         from .platforms.toutiao.client import ToutiaoWeb
-        return ToutiaoWeb.load(path)
-    if platform == "xiaohongshu":
+        client = ToutiaoWeb.load(path)
+    elif platform == "xiaohongshu":
         from .platforms.xiaohongshu.client import XHSHTTP
         ref = store.root / ".storage" / "references" / "xhs-api"
-        return XHSHTTP(path, source=ref)
-    raise ValueError(f"不支持的平台: {platform}")
+        client = XHSHTTP(path, source=ref)
+    else:
+        raise ValueError(f"不支持的平台: {platform}")
+    _apply_proxy(client, proxy)
+    return client
 
 
-def _new_client(platform: str):
+def _new_client(platform: str, *, proxy: str | None = None):
     """Create a fresh unauthenticated client for login flows."""
     if platform == "zhihu":
         from .platforms.zhihu.client import ZhihuWeb
-        return ZhihuWeb()
-    if platform == "toutiao":
+        client = ZhihuWeb()
+    elif platform == "toutiao":
         from .platforms.toutiao.client import ToutiaoWeb
-        return ToutiaoWeb()
-    raise ValueError(f"{platform} 暂不支持通过此方式初始化")
+        client = ToutiaoWeb()
+    else:
+        raise ValueError(f"{platform} 暂不支持通过此方式初始化")
+    _apply_proxy(client, proxy)
+    return client
+
+
+def _apply_proxy(client, proxy: str | None) -> None:
+    """Route the client's HTTP session through an explicit proxy (e.g. a clean exit)."""
+    if not proxy:
+        return
+    http = getattr(client, "http", None)
+    session = getattr(http, "session", None)
+    if session is None:
+        raise ValueError("该平台客户端不支持代理出口")
+    if not (proxy.startswith("http://") or proxy.startswith("https://")
+            or proxy.startswith("socks5://") or proxy.startswith("socks5h://")
+            or proxy.startswith("socks4://") or proxy.startswith("socks4a://")):
+        raise ValueError("代理地址须以 http://、https:// 或 socks5(h):// 开头")
+    session.proxies.update({"http": proxy, "https": proxy})
 
 
 def _session_is_authenticated(path: Path) -> bool:
@@ -114,7 +135,7 @@ def _out_result(result: PublishResult) -> None:
 # login
 # ─────────────────────────────────────────────
 
-def _probe_account(platform: str, store: StorageLayout, cred_path: Path) -> dict | None:
+def _probe_account(platform: str, store: StorageLayout, cred_path: Path, *, proxy: str | None = None) -> dict | None:
     """One-shot network probe of an authenticated credential.
 
     Returns an emit-able status dict when the session is confirmed usable, or None when
@@ -123,7 +144,7 @@ def _probe_account(platform: str, store: StorageLayout, cred_path: Path) -> dict
     """
     client = None
     try:
-        client = _load_client(platform, store)
+        client = _load_client(platform, store, proxy=proxy)
         info = client.account()
         client.save(cred_path)
     except HTTPFailure:
@@ -137,6 +158,7 @@ def _probe_account(platform: str, store: StorageLayout, cred_path: Path) -> dict
 
 def _cmd_login(args, store: StorageLayout) -> int:
     platform = args.platform
+    proxy = getattr(args, "proxy", None)
     # Clean up stale QR codes on every login command
     store.cleanup_stale_qr()
 
@@ -155,7 +177,7 @@ def _cmd_login(args, store: StorageLayout) -> int:
                 if not cred_path.exists():
                     _out({"status": "error", "message": "还没有生成二维码，请先执行 login 不带 --poll"})
                     return 1
-                client = _load_client(platform, store)
+                client = _load_client(platform, store, proxy=proxy)
                 result = client.poll_login()
                 client.save(cred_path)
             else:
@@ -167,15 +189,15 @@ def _cmd_login(args, store: StorageLayout) -> int:
                 #    a fresh anonymous device session when a new QR is needed.
                 authenticated_cred = cred_path.is_file() and _session_is_authenticated(cred_path)
                 if not args.refresh and authenticated_cred:
-                    probe = _probe_account(platform, store, cred_path)
+                    probe = _probe_account(platform, store, cred_path, proxy=proxy)
                     if probe is not None:
                         _out(probe)
                         return 0 if probe.get("status") == "authenticated" else 1
                     # Stale/expired authenticated session: fall through and mint a fresh QR.
                 if cred_path.is_file() and not authenticated_cred:
-                    client = _load_client(platform, store)
+                    client = _load_client(platform, store, proxy=proxy)
                 else:
-                    client = _new_client(platform)
+                    client = _new_client(platform, proxy=proxy)
                 out = client.start_login(qr_path, refresh=args.refresh)
                 client.save(cred_path)
                 result = out if isinstance(out, dict) else {
@@ -311,8 +333,8 @@ def _cmd_reset(args, store: StorageLayout) -> int:
 # publish
 # ─────────────────────────────────────────────
 
-def _do_publish(platform: str, article: Article, store: StorageLayout, draft: bool = False) -> PublishResult:
-    client = _load_client(platform, store)
+def _do_publish(platform: str, article: Article, store: StorageLayout, draft: bool = False, *, proxy: str | None = None) -> PublishResult:
+    client = _load_client(platform, store, proxy=proxy)
     try:
         if draft:
             if not hasattr(client, "draft"):
@@ -343,7 +365,7 @@ def _cmd_publish(args, store: StorageLayout, draft: bool = False) -> int:
         return 1
 
     try:
-        result = _do_publish(platform, article, store, draft=draft)
+        result = _do_publish(platform, article, store, draft=draft, proxy=getattr(args, "proxy", None))
     except HTTPFailure as exc:
         result = PublishResult("pending", str(exc), platform=platform)
     except (FileNotFoundError, PermissionError) as exc:
@@ -370,7 +392,7 @@ def _cmd_verify(args, store: StorageLayout) -> int:
 
     client = None
     try:
-        client = _load_client(platform, store)
+        client = _load_client(platform, store, proxy=getattr(args, "proxy", None))
 
         # Optionally pass original article for content fingerprint verification
         expected = None
@@ -493,6 +515,8 @@ def _build_parser() -> argparse.ArgumentParser:
 """,
     )
     parser.add_argument("--root", metavar="DIR", help="覆盖项目根目录（用于测试）")
+    parser.add_argument("--proxy", metavar="URL",
+                        help="HTTP(S)/SOCKS5 代理出口，例如 --proxy http://127.0.0.1:7890（用于干净出口登录）")
     sub = parser.add_subparsers(dest="command", required=True)
 
     # login

@@ -9,6 +9,7 @@ description = "小红书/知乎/今日头条三平台 HTTP 原生自动化发布
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31",
+    "PySocks>=1.7",
     "Pillow>=10.0.0",
     "qrcode>=7.0",
     "curl_cffi>=0.7",
