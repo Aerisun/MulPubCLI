@@ -120,14 +120,19 @@ class ZhihuWeb:
             raise HTTPFailure('知乎登录会话被平台拒绝，请先处理平台验证；不会自动重试')
         self._login_headers()
         if not self.qr_token or refresh:
-            self.http.request('GET', self.MAIN + '/signin', headers={
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'})
-            self.http.request('POST', self.MAIN + '/udid')
+            # Real browser page navigation doesn't carry x-requested-with or Origin.
+            # Sending them on GET /signin triggers Zhihu's /account/unhuman anti-bot check.
+            nav_headers = {k: v for k, v in self.http.session.headers.items()
+                           if k.lower() not in ('x-requested-with', 'origin', 'accept')}
+            nav_headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            self.http.request('GET', self.MAIN + '/signin', headers=nav_headers)
+            self.http.request('POST', self.MAIN + '/udid', headers=nav_headers)
             xsrf = [cookie.value for cookie in iter_cookies(self.http.session)
                     if cookie.name == '_xsrf' and cookie.value and not cookie.is_expired()]
             if not xsrf:
                 raise HTTPFailure('知乎未授予登录 CSRF 会话')
             self.http.session.headers['x-xsrftoken'] = xsrf[-1]
+
             data = self.http.json('POST', self.MAIN + '/api/v3/account/api/login/qrcode')
             token, link, expiry = data.get('token'), data.get('link'), data.get('expires_at')
             if (not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', token)
