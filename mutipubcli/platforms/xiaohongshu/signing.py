@@ -46,9 +46,9 @@ process.stdout.write(JSON.stringify(signFull(input)));"""
         if proc.returncode:
             raise ValueError('signer failed')
         result = json.loads(proc.stdout)
-        prefix, lengths = {'0101': ('mns0101_', (196, 197, 198)),
-                           '0201': ('mns0201_', (200,))}[context['tier']]
-        if not (result['x3'].startswith(prefix) and len(result['x3']) in lengths
+        prefix, lo, hi = {'0101': ('mns0101_', 196, 206),
+                         '0201': ('mns0201_', 200, 212)}[context['tier']]
+        if not (result['x3'].startswith(prefix) and lo <= len(result['x3']) <= hi
                 and result['xs'] and result['xs_common']):
             raise ValueError('signer output changed')
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):

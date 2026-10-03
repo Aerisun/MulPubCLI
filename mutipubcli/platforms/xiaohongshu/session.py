@@ -1,5 +1,5 @@
 """Load the pinned local protocol source and serialize its device session as JSON."""
-from dataclasses import asdict, fields
+from dataclasses import MISSING, asdict, fields
 from pathlib import Path
 import subprocess
 import sys
@@ -50,17 +50,47 @@ def _filter_dc(cls, data: dict) -> dict:
     return {k: v for k, v in data.items() if k in allowed}
 
 
+def _state(cls, data: dict, *, defaults=None):
+    """Reconstruct a dataclass snapshot, tolerating older credentials missing fields.
+
+    旧凭据可能缺失当前固定 signer 新引入的必填字段（如 CreatorB1RuntimeState 的
+    x51_value/x37_value/x38_value）。补齐优先级：显式 defaults > 类的 reference()
+    参考默认值，避免 TypeError 崩溃，同时保留凭据里已有的字段。
+    """
+    kwargs = _filter_dc(cls, data or {})
+    required = {f.name for f in fields(cls)
+                if f.init and f.default is MISSING and f.default_factory is MISSING}
+    missing = required - kwargs.keys()
+    if missing and defaults:
+        kwargs.update({n: v for n, v in defaults.items() if n in missing})
+    elif missing and hasattr(cls, 'reference'):
+        ref = cls.reference()
+        kwargs.update({n: getattr(ref, n) for n in missing})
+    return cls(**kwargs)
+
+
 def restore_profile(data: dict):
-    from xhs_utils.xhs_creator.state import CreatorDeviceProfile, CreatorSessionState, CreatorB1RuntimeState, CreatorMnsMaterial
+    from xhs_utils.xhs_creator.state import (CreatorDeviceProfile, CreatorSessionState,
+        CreatorB1RuntimeState, CreatorMnsMaterial, _reference_mns_stages, _reference_mns_profiles)
     values = dict(data)
     runtime = values.pop('runtime', {})
     values['session'] = CreatorSessionState(**_filter_dc(CreatorSessionState, values['session']))
-    values['b1_state'] = CreatorB1RuntimeState(**_filter_dc(CreatorB1RuntimeState, values['b1_state']))
-    for name in ('mns_stages', 'mns_profiles'):
-        values[name] = {key: CreatorMnsMaterial(**_filter_dc(CreatorMnsMaterial, {**material, 'env_fp_tail': tuple(material['env_fp_tail'])}))
-                        for key, material in values[name].items()}
+    values['b1_state'] = _state(CreatorB1RuntimeState, values['b1_state'])
+    # Current signer only accepts mns_stages keyed 'bootstrap'/'ready' and reference
+    # profile names (see resolve_mns_material). Old credentials use other names
+    # (security/coldContent/steadyContent), so rebuild from reference and overlay any
+    # captured stage/profile that matches the current schema.
+    for name, factory in (('mns_stages', _reference_mns_stages), ('mns_profiles', _reference_mns_profiles)):
+        base = factory()
+        stored = values.get(name, {}) or {}
+        values[name] = {
+            key: (_state(CreatorMnsMaterial, {**stored[key], 'env_fp_tail': tuple(stored[key]['env_fp_tail'])},
+                        defaults={'device_tag': getattr(mat, 'device_tag', '')})
+                  if key in stored else mat)
+            for key, mat in base.items()
+        }
     profile = CreatorDeviceProfile(**_filter_dc(CreatorDeviceProfile, values))
-    profile._named_b1_states = {key: CreatorB1RuntimeState(**_filter_dc(CreatorB1RuntimeState, value)) for key, value in runtime.get('named_states', {}).items()}
+    profile._named_b1_states = {key: _state(CreatorB1RuntimeState, value) for key, value in runtime.get('named_states', {}).items()}
     profile._named_b1_values = runtime.get('named_values', {})
     profile._b1_state_explicit = runtime.get('explicit', False)
     profile._mns_stage_overrides = set(runtime.get('overrides', []))
