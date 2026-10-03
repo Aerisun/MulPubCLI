@@ -1,6 +1,6 @@
 # CLI 使用手册
 
-完整的 `mutipubcli` 命令行参考。
+完整的 `mulpubcli` 命令行参考。
 
 ---
 
@@ -10,19 +10,20 @@
 pip install -e .
 ```
 
-安装后可直接使用 `mutipubcli` 命令，也可用 `python -m mutipubcli`。
+安装后可直接使用 `mulpubcli` 命令，也可用 `python -m mulpubcli`。
 
 ---
 
 ## 全局选项
 
 ```
-mutipubcli [--root DIR] <command> ...
+mulpubcli [--root DIR] [--proxy URL] <command> ...
 ```
 
 | 选项 | 说明 |
 |------|------|
 | `--root DIR` | 覆盖项目根目录（默认自动定位 `pyproject.toml` 所在目录），一般用于测试 |
+| `--proxy URL` | HTTP(S)/SOCKS5 代理出口，例如 `--proxy http://127.0.0.1:7890`（用于干净出口登录） |
 
 ---
 
@@ -36,32 +37,33 @@ mutipubcli [--root DIR] <command> ...
 
 ---
 
-## login — 扫码登录
+## login — 登录
 
 ```
-mutipubcli login <platform> [--method qr|sms] [--refresh]
+mulpubcli login <platform> [--method qr|sms] [--refresh] [--poll|--confirm|--cookie-file FILE]
 ```
 
 `login` 是幂等的：反复执行会**优先复用有效状态**，而不是无谓生成新二维码。
 
-- 已有**有效登录态**：内部做一次只读校验，确认有效后直接返回 `authenticated`，不再生成二维码。
-- 登录态**已过期/失效**：自动用全新匿名设备会话生成二维码替换旧会话，并返回新二维码。
-- 已有**未过期的二维码**：直接复用，不重新生成。
-- 二维码**过期**：自动刷新并返回新二维码。
+- 小红书 / 今日头条：默认二维码登录。已有有效登录态直接返回 `authenticated`；登录态失效会自动生成新二维码替换；未过期二维码直接复用。
+- 知乎：通常用浏览器导出的 Cookie 导入登录态（见 `--cookie-file`），二维码作为回退方式。
 
 ```bash
 # 生成二维码（输出 JSON 含 qr_image 路径）
-mutipubcli login toutiao
+mulpubcli login toutiao
 
 # 用手机 App 扫码后，做一次"确认"轮询，完成登录
-mutipubcli login toutiao --poll
+mulpubcli login toutiao --poll
 
 # 强制重新登录（生成全新二维码）
-mutipubcli login toutiao --refresh
+mulpubcli login toutiao --refresh
 
 # 小红书短信登录
-mutipubcli login xiaohongshu --method sms            # 输入手机号，发送验证码
-mutipubcli login xiaohongshu --method sms --confirm  # 输入验证码完成登录
+mulpubcli login xiaohongshu --method sms            # 输入手机号，发送验证码
+mulpubcli login xiaohongshu --method sms --confirm  # 输入验证码完成登录
+
+# 知乎：从浏览器导出的 Cookie 文件导入登录态
+mulpubcli login zhihu --cookie-file cookies.txt
 ```
 
 **选项说明：**
@@ -71,7 +73,9 @@ mutipubcli login xiaohongshu --method sms --confirm  # 输入验证码完成登�
 | `--method qr` | 二维码登录（默认） |
 | `--method sms` | 短信登录（仅小红书） |
 | `--poll` | 扫码后单次确认扫码结果并完成登录（只查一次，不会反复轮询） |
-| `--refresh` | 强制刷新二维码，彻底重新登录 |
+| `--confirm` | 输入短信验证码确认（仅 `--method sms`） |
+| `--cookie-file FILE` | 从文件导入浏览器导出的知乎 Cookie（原始 Cookie 头 / Chrome/Playwright JSON / cookies.txt） |
+| `--refresh` | 强制刷新二维码 / 强制重新导入知乎 Cookie（忽略现有登录态） |
 
 **输出状态说明：**
 
@@ -87,35 +91,39 @@ mutipubcli login xiaohongshu --method sms --confirm  # 输入验证码完成登�
 
 ---
 
-## session — 查看登录状态
+## session — 实时查看登录状态
 
 ```
-mutipubcli session [<platform>]
+mulpubcli session [<platform>]
 ```
 
-只读查看各平台**本地登录状态**，不发起网络请求，可随时执行，不轮询。
+**实时联网核验**各平台登录态有效性，而不是只读本地文件。
 
 ```bash
-mutipubcli session          # 查看全部平台
-mutipubcli session zhihu    # 只看知乎
+mulpubcli session          # 查看全部平台
+mulpubcli session zhihu    # 只看知乎
 ```
 
-每个平台输出 `status`（`needs_login` / `pending_scan` / `expired` / `blocked` / `authenticated`）、凭证路径、二维码年龄等。
+每个平台做一次轻量已认证探测（小红书读发布状态接口，知乎 / 头条查账号信息），返回 `status`：
 
-> `login` 会做一次线上校验确认有效；`session` 只看本地状态，两者配合即可，无需反复轮询。
+| status | 含义 |
+|--------|------|
+| `authenticated` | 凭证有效，可直接发布 |
+| `needs_login` | 凭证缺失或已失效，需重新 `login` |
+| `unreachable` | 网络或服务端暂态，登录态未知（不误报"未登录"） |
 
 ---
 
 ## reset — 清理登录状态
 
 ```
-mutipubcli reset <platform>
+mulpubcli reset <platform>
 ```
 
 删除指定平台的登录凭证和二维码，下一次 `login` 完全从头开始。用于清理卡死或需要换账号登录的场景。
 
 ```bash
-mutipubcli reset zhihu
+mulpubcli reset zhihu
 ```
 
 ---
@@ -123,7 +131,7 @@ mutipubcli reset zhihu
 ## publish — 发布文章
 
 ```
-mutipubcli publish <platform> --article FILE --cover FILE
+mulpubcli publish <platform> --article FILE [--force]
 ```
 
 正式发布（公开可见）。包含以下步骤：
@@ -134,19 +142,18 @@ mutipubcli publish <platform> --article FILE --cover FILE
 5. 提交文章
 6. 回读核验
 
+封面在稿件内用 `<!-- cover: 路径 -->` 指令指定（详见 [docs/publishing.md](publishing.md)），不再需要单独的 `--cover` 参数。
+
 ```bash
-mutipubcli publish zhihu \
-  --article article.md \
-  --cover   cover.jpg
-
-mutipubcli publish toutiao \
-  --article article.md \
-  --cover   cover.jpg
-
-mutipubcli publish xiaohongshu \
-  --article article.md \
-  --cover   cover.jpg
+mulpubcli publish zhihu --article article.md
+mulpubcli publish toutiao --article article.md
+mulpubcli publish xiaohongshu --article article.md
 ```
+
+| 选项 | 说明 |
+|------|------|
+| `--article FILE` | Markdown 稿件路径（第一行为 `# 标题`，封面用 `<!-- cover: 路径 -->` 指令） |
+| `--force` | 强制发送：跳过本地 24 小时去重与 pending 记录拦截，直接重新投稿并记账 |
 
 **输出状态说明：**
 
@@ -164,48 +171,67 @@ mutipubcli publish xiaohongshu \
 ## draft — 保存草稿
 
 ```
-mutipubcli draft <platform> --article FILE --cover FILE
+mulpubcli draft <platform> --article FILE [--force]
 ```
 
 仅支持 `zhihu` 和 `toutiao`。流程与 publish 相同，但结果为草稿（不公开发布）。
 
 ```bash
-mutipubcli draft zhihu --article article.md --cover cover.jpg
+mulpubcli draft zhihu --article article.md
 ```
 
 ---
 
-## verify — 查询文章状态
+## list — 实时发布列表
 
 ```
-mutipubcli verify <platform> --id ARTICLE_ID [--article FILE]
+mulpubcli list [<platform>] [--json]
 ```
 
-通过平台 ID 回查已提交的文章状态。
+查看已发布文章的实时列表。小红书 / 头条直接读平台最新数据（已删除的文章自然消失）；知乎无"已发布列表"接口，走本地发布台账兜底（并实时回查单篇状态）。
 
 ```bash
-mutipubcli verify toutiao --id 7385929102934
-mutipubcli verify zhihu --id 1234567890 --article article.md
+mulpubcli list                     # 全部平台（可读表格）
+mulpubcli list xiaohongshu         # 只看小红书
+mulpubcli list --json              # 输出原始 JSON，供机器使用
 ```
 
-| 参数 | 说明 |
-|------|------|
-| `--id` | 平台分配的文章 ID（必须） |
-| `--article` | 原稿路径（可选），用于内容指纹核验 |
+表格列：发布时间 / 平台 / 标题 / 编号（ID）。
+
+---
+
+## verify — 回查文章状态
+
+```
+mulpubcli verify [--id ID] [--platform <platform>] [--article FILE] [--json]
+```
+
+回查文章在线状态，两种用法：
+
+- **`--id ID`**：查单篇。文章 ID 全局唯一，无需指定平台，自动识别所属平台。可选 `--article` 配合内容指纹核验。
+- **`--platform <platform>`**（或省略全部参数）：刷新整平台列表状态，只汇报**变化**（新发布几篇 / 删除几篇）。检测到已删除的文章会询问是否将其从本地列表中移除。
+
+```bash
+mulpubcli verify --id 7385929102934                  # 回查单篇，自动识别平台
+mulpubcli verify --id 1234567890 --article article.md  # 配合内容指纹核验
+mulpubcli verify --platform zhihu                    # 刷新知乎，汇报变化并移除已删除项
+mulpubcli verify                                    # 刷新全部平台
+mulpubcli verify --json                              # 输出原始 JSON，跳过删除交互（供机器用）
+```
 
 ---
 
 ## status — 查看发布记录
 
 ```
-mutipubcli status [--platform <platform>]
+mulpubcli status [--platform <platform>]
 ```
 
 查看本地幂等账本中的发布历史。
 
 ```bash
-mutipubcli status                    # 全部平台
-mutipubcli status --platform zhihu  # 仅知乎
+mulpubcli status                    # 全部平台
+mulpubcli status --platform zhihu  # 仅知乎
 ```
 
 记录存储在 `.storage/results/`。
@@ -215,7 +241,7 @@ mutipubcli status --platform zhihu  # 仅知乎
 ## storage — 查看存储状态
 
 ```
-mutipubcli storage
+mulpubcli storage
 ```
 
 诊断命令，显示：
@@ -224,7 +250,7 @@ mutipubcli storage
 - 当前临时二维码列表及生成时长
 
 ```bash
-mutipubcli storage
+mulpubcli storage
 ```
 
 ---

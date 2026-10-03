@@ -1,15 +1,15 @@
-"""mutipubcli — 统一多平台 HTTP 发布 CLI。
+"""mulpubcli — 统一多平台 HTTP 发布 CLI。
 
 命令一览：
-  mutipubcli login   <platform> [--refresh] [--method sms]
-  mutipubcli session [<platform>]        # 实时探测各平台登录态（联网核验）
-  mutipubcli reset   <platform>          # 清理登录状态后重新登录
-  mutipubcli publish <platform> --article FILE
-  mutipubcli draft   <platform> --article FILE
-  mutipubcli verify  [--id ARTICLE_ID | --platform <platform>] [--json]
-  mutipubcli status  [--platform <platform>]
-  mutipubcli list    [<platform>] [--json]  # 可读表格发布列表（xhs/toutiao 实时，知乎走本地台账）
-  mutipubcli storage            # 查看内部存储占用
+  mulpubcli login   <platform> [--refresh] [--method sms]
+  mulpubcli session [<platform>]        # 实时探测各平台登录态（联网核验）
+  mulpubcli reset   <platform>          # 清理登录状态后重新登录
+  mulpubcli publish <platform> --article FILE
+  mulpubcli draft   <platform> --article FILE
+  mulpubcli verify  [--id ARTICLE_ID | --platform <platform>] [--json]
+  mulpubcli status  [--platform <platform>]
+  mulpubcli list    [<platform>] [--json]  # 可读表格发布列表（xhs/toutiao 实时，知乎走本地台账）
+  mulpubcli storage            # 查看内部存储占用
 
 支持平台: 小红书 知乎 头条
 """
@@ -39,7 +39,7 @@ def _load_client(platform: str, store: StorageLayout, *, proxy: str | None = Non
     path = store.credentials(platform)
     if not path.is_file():
         raise FileNotFoundError(
-            f"尚无 {platform} 凭证（{path}），请先执行: mutipubcli login {platform}"
+            f"尚无 {platform} 凭证（{path}），请先执行: mulpubcli login {platform}"
         )
     if path.stat().st_mode & 0o077:
         raise PermissionError(f"凭证文件权限过宽，请修为 600：{path}")
@@ -211,7 +211,7 @@ def _cmd_login(args, store: StorageLayout) -> int:
                 result = out if isinstance(out, dict) else {
                     "status": "waiting",
                     "qr_image": str(qr_path),
-                    "message": f"请用 {platform} App 扫描二维码，扫完后执行: mutipubcli login {platform} --poll",
+                    "message": f"请用 {platform} App 扫描二维码，扫完后执行: mulpubcli login {platform} --poll",
                 }
     except (FileNotFoundError, PermissionError, ValueError) as exc:
         _out({"status": "error", "message": str(exc)})
@@ -257,7 +257,7 @@ def _xhs_login(args, store: StorageLayout) -> int:
                     result = out if isinstance(out, dict) else {
                         "status": "waiting",
                         "qr_image": str(qr_path),
-                        "message": "请用小红书 App 扫描二维码，扫完后执行: mutipubcli login xiaohongshu --poll",
+                        "message": "请用小红书 App 扫描二维码，扫完后执行: mulpubcli login xiaohongshu --poll",
                     }
                 client.save()
     except (FileNotFoundError, PermissionError, ValueError) as exc:
@@ -1024,24 +1024,24 @@ def _cmd_storage(args, store: StorageLayout) -> int:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="mutipubcli",
+        prog="mulpubcli",
         description="小红书 / 知乎 / 今日头条  HTTP 原生自动化发布 CLI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  mutipubcli login toutiao              # 生成登录二维码（小红书、头条） / 要求提供 Cookie（知乎）
-  mutipubcli login toutiao --refresh    # 弃用已有登录，并重新登录
-  mutipubcli session                    # 查看各平台本地登录状态
-  mutipubcli session zhihu              # 只看知乎登录状态
-  mutipubcli reset zhihu                # 清理知乎登录状态
-  mutipubcli publish zhihu --article article.md       # 发布稿件
-  mutipubcli list                                     # 查看各平台发布列表
-  mutipubcli list xiaohongshu                         # 只看小红书发布列表
-  mutipubcli verify --id 7385929102934               # 回查单篇文章（自动识别平台）
-  mutipubcli verify --platform zhihu                # 刷新知乎，汇报变化并从列表移除已删除项
-  mutipubcli verify                                 # 刷新全部平台
-  mutipubcli status
-  mutipubcli storage                    # 查看存储状态
+  mulpubcli login toutiao              # 生成登录二维码（小红书、头条） / 要求提供 Cookie（知乎）
+  mulpubcli login toutiao --refresh    # 弃用已有登录，并重新登录
+  mulpubcli session                    # 查看各平台本地登录状态
+  mulpubcli session zhihu              # 只看知乎登录状态
+  mulpubcli reset zhihu                # 清理知乎登录状态
+  mulpubcli publish zhihu --article article.md       # 发布稿件
+  mulpubcli list                                     # 查看各平台发布列表
+  mulpubcli list xiaohongshu                         # 只看小红书发布列表
+  mulpubcli verify --id 7385929102934               # 回查单篇文章（自动识别平台）
+  mulpubcli verify --platform zhihu                # 刷新知乎，汇报变化并从列表移除已删除项
+  mulpubcli verify                                 # 刷新全部平台
+  mulpubcli status
+  mulpubcli storage                    # 查看存储状态
 """,
     )
     parser.add_argument("--root", metavar="DIR", help="覆盖项目根目录（用于测试）")

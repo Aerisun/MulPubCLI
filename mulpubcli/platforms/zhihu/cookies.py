@@ -217,7 +217,7 @@ def build_session(records: list[dict]) -> requests.Session:
     复用 http.add_cookies，与 load_session 从凭证文件恢复会话使用同一套逻辑，
     保证导入后与发布/核验路径的行为完全一致。
     """
-    from mutipubcli.http import add_cookies
+    from mulpubcli.http import add_cookies
 
     session = requests.Session()
     add_cookies(session, records)

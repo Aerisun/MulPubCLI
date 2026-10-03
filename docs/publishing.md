@@ -10,10 +10,13 @@
 
 - **第一行**必须是 `# 标题`，即 Markdown 一级标题
 - 标题后空一行，其余为正文
+- 封面用一行 HTML 注释指令 `<!-- cover: 路径 -->` 指定（标题行之后的任意行）
 - 正文中可以用标准 Markdown 图片语法引用**本地图片**
 
 ```markdown
 # 雾水之畔的木舟
+
+<!-- cover: ./cover.jpg -->
 
 清晨的湖面总是被一层薄薄的雾气笼罩着，仿佛天地间还没有完全醒来。
 
@@ -28,21 +31,21 @@
 
 | 类型 | 来源 | 说明 |
 |------|------|------|
-| **封面图** | `--cover FILE` 命令行参数 | 独立于正文，作为文章题图，必须提供 |
+| **封面图** | 稿件内 `<!-- cover: 路径 -->` 指令 | 独立于正文，作为文章题图，必须提供 |
 | **正文图** | 正文 `![alt](./local.jpg)` | 嵌在 Markdown 正文中的本地路径，自动上传 |
 
 **规则：**
 - 封面图和正文图均须为本地文件（JPG / PNG / WEBP）
 - 正文中引用远程图片（`http://` / `https://`）直接保留，不上传
-- 所有本地图片在 `mutipubcli publish` 执行时自动检查是否存在，缺失则立即报错，不会发出请求
+- 所有本地图片在 `mulpubcli publish` 执行时自动检查是否存在，缺失则立即报错，不会发出请求
 
 ---
 
 ## 图片上传流程
 
 ```
-1. Article.load(article.md, cover.jpg)
-   ├─ 解析标题和正文
+1. Article.load(article.md)
+   ├─ 解析标题、定位封面指令（<!-- cover: -->）和正文
    └─ 扫描正文中的本地图片路径 → body_images
 
 2. 上传封面图
@@ -104,7 +107,6 @@ my-article/
 发布命令：
 
 ```bash
-mutipubcli publish zhihu \
-  --article my-article/article.md \
-  --cover   my-article/cover.jpg
+mulpubcli publish zhihu \
+  --article my-article/article.md
 ```

@@ -1,4 +1,4 @@
-"""mutipubcli.core — 共享数据模型。
+"""mulpubcli.core — 共享数据模型。
 
 Article
     title       : str          — 文章标题（从 Markdown 第一行 # 提取）

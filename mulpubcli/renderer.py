@@ -1,8 +1,8 @@
-"""mutipubcli.renderer — Markdown → 平台 HTML 渲染器。
+"""mulpubcli.renderer — Markdown → 平台 HTML 渲染器。
 
 使用方式：
 
-    from mutipubcli.renderer import render
+    from mulpubcli.renderer import render
 
     # 第一步：扫描 article，得到需要上传的本地图片列表（Article.body_images）
     # 第二步：平台 client 逐一上传图片，建立映射表

@@ -14,8 +14,8 @@ from urllib.parse import urlsplit
 
 from PIL import Image
 
-from mutipubcli.core import Article, PublishResult, content_fingerprint, content_matches, strip_markdown_images
-from mutipubcli.http import HTTP, HTTPFailure, private_json
+from mulpubcli.core import Article, PublishResult, content_fingerprint, content_matches, strip_markdown_images
+from mulpubcli.http import HTTP, HTTPFailure, private_json
 from .session import SIGNER_REV, load_source, restore_profile, dump_profile
 from .signing import creator_params
 

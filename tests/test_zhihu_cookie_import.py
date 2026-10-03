@@ -11,10 +11,10 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from mutipubcli.http import HTTPFailure
-from mutipubcli.platforms.zhihu import cookies as zhihu_cookies
-from mutipubcli.platforms.zhihu.client import ZhihuWeb
-from mutipubcli.storage import StorageLayout
+from mulpubcli.http import HTTPFailure
+from mulpubcli.platforms.zhihu import cookies as zhihu_cookies
+from mulpubcli.platforms.zhihu.client import ZhihuWeb
+from mulpubcli.storage import StorageLayout
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -217,20 +217,20 @@ def test_import_cookie_text_saves_verified_credential(self):
 
 class ZhihuCliLoginTests(unittest.TestCase):
     def test_zhihu_without_cookie_file_is_an_error(self):
-        from mutipubcli.__main__ import _cmd_login
+        from mulpubcli.__main__ import _cmd_login
         with TemporaryDirectory(dir=PROJECT_ROOT) as tmp:
             store = StorageLayout(Path(tmp))
-            with patch('mutipubcli.__main__._out') as out:
+            with patch('mulpubcli.__main__._out') as out:
                 code = _cmd_login(_login_args('zhihu'), store)
             self.assertEqual(code, 1)
             self.assertEqual(out.call_args[0][0]['status'], 'error')
 
     def test_zhihu_with_cookie_file_imports_and_reports(self):
-        from mutipubcli.__main__ import _cmd_login
+        from mulpubcli.__main__ import _cmd_login
         with TemporaryDirectory(dir=PROJECT_ROOT) as tmp:
             store = StorageLayout(Path(tmp))
             source = _write_file(tmp, 'cookies.txt', RAW_HEADER)
-            with patch('mutipubcli.__main__._out') as out, \
+            with patch('mulpubcli.__main__._out') as out, \
                  patch.object(ZhihuWeb, 'account', return_value={'id': 'u1', 'name': 'n'}):
                 code = _cmd_login(_login_args('zhihu', cookie_file=str(source)), store)
             self.assertEqual(code, 0)
@@ -241,11 +241,11 @@ class ZhihuCliLoginTests(unittest.TestCase):
 
 
     def test_zhihu_cookie_stdin_imports_and_reports(self):
-        from mutipubcli.__main__ import _cmd_login
+        from mulpubcli.__main__ import _cmd_login
         with TemporaryDirectory(dir=PROJECT_ROOT) as tmp:
             store = StorageLayout(Path(tmp))
-            with patch('mutipubcli.__main__._read_cookie_stdin', return_value=RAW_HEADER), \
-                 patch('mutipubcli.__main__._out') as out, \
+            with patch('mulpubcli.__main__._read_cookie_stdin', return_value=RAW_HEADER), \
+                 patch('mulpubcli.__main__._out') as out, \
                  patch.object(ZhihuWeb, 'account', return_value={'id': 'u2', 'name': 'n'}):
                 code = _cmd_login(_login_args('zhihu', cookie_stdin=True), store)
             self.assertEqual(code, 0)

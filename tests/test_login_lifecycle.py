@@ -9,15 +9,15 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from mutipubcli.http import HTTPFailure
-from mutipubcli.storage import StorageLayout
-from mutipubcli.__main__ import (
+from mulpubcli.http import HTTPFailure
+from mulpubcli.storage import StorageLayout
+from mulpubcli.__main__ import (
     _cmd_login,
     _cmd_reset,
     _cmd_session,
     _credential_health,
 )
-from mutipubcli.platforms.xiaohongshu.login import (
+from mulpubcli.platforms.xiaohongshu.login import (
     INITIALIZING_STALE_SECONDS,
     XHSLoginRuntime,
 )
@@ -104,7 +104,7 @@ class SessionCommandTests(unittest.TestCase):
     def test_session_reports_all_platforms(self):
         with TemporaryDirectory(dir=PROJECT_ROOT) as tmp:
             store = StorageLayout(Path(tmp))
-            with patch('mutipubcli.__main__._out') as out:
+            with patch('mulpubcli.__main__._out') as out:
                 code = _cmd_session(_args(platform=None), store)
             self.assertEqual(code, 0)
             payload = out.call_args[0][0]
@@ -117,7 +117,7 @@ class SessionCommandTests(unittest.TestCase):
             store = StorageLayout(Path(tmp))
             store.credentials('zhihu').write_text(json.dumps({'account_id': 'a'}))
             store.qr_image('zhihu').write_text('png')
-            with patch('mutipubcli.__main__._out') as out:
+            with patch('mulpubcli.__main__._out') as out:
                 code = _cmd_reset(_args('zhihu'), store)
             self.assertEqual(code, 0)
             self.assertFalse(store.credentials('zhihu').exists())
@@ -132,9 +132,9 @@ class LoginReuseAndRefreshTests(unittest.TestCase):
             cred = store.credentials('toutiao')
             cred.write_text(json.dumps({'account_id': 'abc', 'cookies': [{'name': 'z_c0', 'value': 'tok'}]}))
             client = _FakeClient(account_result={'id': 'abc', 'name': 'me'})
-            with patch('mutipubcli.__main__._load_client', return_value=client), \
-                 patch('mutipubcli.__main__._new_client') as new_client, \
-                 patch('mutipubcli.__main__._out') as out:
+            with patch('mulpubcli.__main__._load_client', return_value=client), \
+                 patch('mulpubcli.__main__._new_client') as new_client, \
+                 patch('mulpubcli.__main__._out') as out:
                 code = _cmd_login(_args('toutiao'), store)
             self.assertEqual(code, 0)
             # Valid session is returned as usable; no fresh QR is minted.
@@ -149,9 +149,9 @@ class LoginReuseAndRefreshTests(unittest.TestCase):
             cred.write_text(json.dumps({'account_id': 'abc', 'cookies': [{'name': 'z_c0', 'value': 'tok'}]}))
             stale_client = _FakeClient(account_result=HTTPFailure('登录态已失效', code=40352))
             fresh_client = _FakeClient()
-            with patch('mutipubcli.__main__._load_client', side_effect=[stale_client]), \
-                 patch('mutipubcli.__main__._new_client', return_value=fresh_client), \
-                 patch('mutipubcli.__main__._out') as out:
+            with patch('mulpubcli.__main__._load_client', side_effect=[stale_client]), \
+                 patch('mulpubcli.__main__._new_client', return_value=fresh_client), \
+                 patch('mulpubcli.__main__._out') as out:
                 code = _cmd_login(_args('toutiao'), store)
             self.assertEqual(code, 0)
             # Probe failed => fresh anonymous QR is minted to replace the stale session.

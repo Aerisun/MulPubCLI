@@ -7,9 +7,9 @@ from unittest.mock import patch
 import requests
 from curl_cffi import requests as curl_requests
 
-from mutipubcli.http import HTTP, HTTPFailure, save_session
-from mutipubcli.platforms.toutiao.client import ToutiaoWeb
-from mutipubcli.platforms.zhihu.client import ZhihuWeb
+from mulpubcli.http import HTTP, HTTPFailure, save_session
+from mulpubcli.platforms.toutiao.client import ToutiaoWeb
+from mulpubcli.platforms.zhihu.client import ZhihuWeb
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

@@ -15,9 +15,9 @@ from urllib.parse import urljoin, urlsplit
 
 from PIL import Image
 
-from mutipubcli.core import Article, PublishResult, content_fingerprint, content_matches, strip_markdown_images
-from mutipubcli.http import HTTP, HTTPFailure, iter_cookies, load_session, save_session
-from mutipubcli.renderer import render as _render_article, _ArticleHTML
+from mulpubcli.core import Article, PublishResult, content_fingerprint, content_matches, strip_markdown_images
+from mulpubcli.http import HTTP, HTTPFailure, iter_cookies, load_session, save_session
+from mulpubcli.renderer import render as _render_article, _ArticleHTML
 
 
 PLATFORM = 'toutiao'

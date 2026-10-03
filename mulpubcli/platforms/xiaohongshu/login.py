@@ -9,7 +9,7 @@ import tempfile
 import subprocess
 import time
 
-from mutipubcli.http import HTTPFailure, private_json
+from mulpubcli.http import HTTPFailure, private_json
 from .session import load_source, dump_profile, restore_profile, restore_pc_profile
 
 # A crash mid-init leaves 'initializing' set forever, so the next login refuses to
