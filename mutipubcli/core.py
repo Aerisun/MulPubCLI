@@ -44,6 +44,15 @@ def _extract_body_images(body: str, base_dir: Path) -> tuple[Path, ...]:
     return tuple(seen.values())
 
 
+def strip_markdown_images(text: str) -> str:
+    """Remove Markdown image syntax ``![alt](src)`` from plain text.
+
+    面向把图片单独放图集、正文只存纯文本的平台（如小红书），正文不应回显
+    Markdown 图片语法。仅删除图片标记，保留周围正文与换行结构。
+    """
+    return _MD_IMG_RE.sub('', text)
+
+
 @dataclass(frozen=True)
 class Article:
     title: str

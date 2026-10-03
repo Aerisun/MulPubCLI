@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 from PIL import Image
 
-from mutipubcli.core import Article, PublishResult, content_fingerprint, content_matches
+from mutipubcli.core import Article, PublishResult, content_fingerprint, content_matches, strip_markdown_images
 from mutipubcli.http import HTTP, HTTPFailure, private_json
 from .session import SIGNER_REV, load_source, restore_profile, dump_profile
 from .signing import creator_params
@@ -34,7 +34,7 @@ def image_payload(article: Article, images: list[dict]) -> dict:
              'noteCopyBind': {'copyable': True}, 'interactionPermissionBind': {'commentPermission': 0},
              'optionRelationList': []}
     return {'common': {
-        'type': 'normal', 'title': article.title, 'desc': article.body, 'note_id': '',
+        'type': 'normal', 'title': article.title, 'desc': strip_markdown_images(article.body), 'note_id': '',
         'source': json.dumps({'type': 'web', 'ids': '', 'extraInfo': json.dumps({'subType': 'official', 'systemId': 'web'})}),
         'business_binds': json.dumps(binds, separators=(',', ':')), 'ats': [], 'hash_tag': [],
         'privacy_info': {'op_type': 1, 'type': 0, 'user_ids': []}, 'goods_info': {}, 'biz_relations': [],
@@ -149,7 +149,7 @@ class XHSHTTP:
             raise ValueError('小红书笔记 ID 无效')
         evidence = dict(evidence or {})
         if expected is not None:
-            evidence.update(content_fingerprint('xiaohongshu', expected.title, expected.body))
+            evidence.update(content_fingerprint('xiaohongshu', expected.title, strip_markdown_images(expected.body)))
         url = f'https://www.xiaohongshu.com/explore/{note_id}'
         verification = 'unavailable'
         note, page, visited = None, 0, set()
