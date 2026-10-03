@@ -26,30 +26,82 @@ from __future__ import annotations
 
 import re
 from html import escape
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .core import Article
+from .http import HTTPFailure
 
 _MD_IMG_RE = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
+
+
+class _ArticleHTML(HTMLParser):
+    """Parse article HTML to compare visible text and image srcs across platforms.
+
+    同时供知乎与头条回读核验使用，容忍编辑器额外加的属性。text 折叠空白，
+    images 按文档顺序保留图片源地址。
+    """
+    BLOCKS = {'p', 'div', 'figure', 'br', 'li', 'h1', 'h2', 'h3', 'blockquote'}
+
+    def __init__(self, content):
+        super().__init__(convert_charrefs=True)
+        self.parts, self.images = [], []
+        if not isinstance(content, str):
+            raise HTTPFailure('正文响应结构无效', kind='invalid_response')
+        self.feed(content)
+        self.close()
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.BLOCKS:
+            self.parts.append(' ')
+        if tag == 'img':
+            source = dict(attrs).get('src') or ''
+            if source.startswith('//'):
+                source = 'https:' + source
+            self.images.append(urlsplit(source)._replace(query='', fragment='').geturl())
+
+    def handle_endtag(self, tag):
+        if tag in self.BLOCKS:
+            self.parts.append(' ')
+
+    @property
+    def text(self):
+        return ' '.join(''.join(self.parts).split())
 
 
 def _is_remote(src: str) -> bool:
     return src.startswith(("http://", "https://", "data:"))
 
 
-def _resolve_src(src: str, image_map: dict[str, str]) -> str | None:
-    """Return the platform URL for a given image src, or None if unavailable."""
+def _resolve_src(src: str, image_map: dict[str, str], *, base_dir: Path | None = None) -> str | None:
+    """Return the platform URL for a given image src, or None if unavailable.
+
+    src may be written relative to the Markdown file's directory (the common
+    case: ``![图](images/a.png)``). Resolve against base_dir (article.source_dir)
+    so the key matches Article.body_images regardless of the process CWD —
+    resolving against CWD silently drops every body image when the CLI runs
+    from a different directory.
+    """
     src = src.strip()
     if _is_remote(src):
         return src
-    # Try direct key match first, then resolved absolute path
+    # Try direct key match first (CWD-independent literal, e.g. absolute paths)
     if src in image_map:
         return image_map[src]
+    # Resolve relative to the Markdown's directory, then fall back to CWD.
+    if src and base_dir is not None and not Path(src).is_absolute():
+        resolved = str((base_dir / src).resolve())
+        if resolved in image_map:
+            return image_map[resolved]
     resolved = str(Path(src).resolve())
     return image_map.get(resolved)
 
 
-def _render_body(body: str, image_map: dict[str, str]) -> str:
+def _render_body(body: str, image_map: dict[str, str], *, base_dir: Path | None = None) -> str:
     """Convert Markdown body to HTML.
 
     Layout rules:
@@ -76,7 +128,7 @@ def _render_body(body: str, image_map: dict[str, str]) -> str:
             if before:
                 result.append(before)
             alt, src = m.group(1), m.group(2)
-            url = _resolve_src(src, image_map)
+            url = _resolve_src(src, image_map, base_dir=base_dir)
             if url:
                 result.append(f'<img src="{escape(url, quote=True)}" alt="{escape(alt)}">')
             # If no URL for local image, drop it silently
@@ -100,7 +152,7 @@ def _render_body(body: str, image_map: dict[str, str]) -> str:
         if sole:
             _flush_paragraph()
             alt, src = sole.group(1), sole.group(2)
-            url = _resolve_src(src, image_map)
+            url = _resolve_src(src, image_map, base_dir=base_dir)
             if url:
                 parts.append(
                     f'<figure><img src="{escape(url, quote=True)}" alt="{escape(alt)}"></figure>'
@@ -148,7 +200,7 @@ def render(
                 f'<figure><img src="{escape(cover_url, quote=True)}" alt="文章配图"></figure>'
             )
 
-    body_html = _render_body(article.body, image_map)
+    body_html = _render_body(article.body, image_map, base_dir=article.source_dir)
     if body_html:
         parts.append(body_html)
 

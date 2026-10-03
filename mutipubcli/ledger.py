@@ -126,7 +126,7 @@ class ResultLedger:
         previous = self._read(path) if path.exists() else {}
         now = datetime.now(timezone.utc).isoformat()
         reserved = now if new_reservation else previous.get('reserved_at', previous.get('saved_at', now))
-        payload = {**previous, **asdict(result), "platform": platform, "saved_at": now, 'reserved_at': reserved}
+        payload = {"title": article.title, **previous, **asdict(result), "platform": platform, "saved_at": now, 'reserved_at': reserved}
         payload.setdefault('content_check', content_fingerprint(platform, article.title, article.body))
         private_json(path, payload)
         return path

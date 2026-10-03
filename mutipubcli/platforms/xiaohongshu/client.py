@@ -140,7 +140,7 @@ class XHSHTTP:
 
     def statuses(self):
         data = self.posted().get('data') or {}
-        fields = ('id', 'display_title', 'tab_status', 'permission_code')
+        fields = ('id', 'display_title', 'tab_status', 'permission_code', 'time')
         return {'notes': [{key: note.get(key) for key in fields} for note in data.get('notes', [])],
                 'page': data.get('page')}
 

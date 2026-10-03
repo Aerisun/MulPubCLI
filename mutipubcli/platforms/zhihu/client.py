@@ -8,49 +8,16 @@ import time
 import os
 import uuid
 from html import escape
-from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from PIL import Image
 
-from mutipubcli.core import Article, PublishResult, content_fingerprint, content_matches
+from mutipubcli.core import Article, PublishResult, content_fingerprint, content_matches, strip_markdown_images
 from mutipubcli.http import HTTP, HTTPFailure, chrome_session, iter_cookies, load_session, save_session
-from mutipubcli.renderer import render as _render_article
+from mutipubcli.renderer import render as _render_article, _ArticleHTML
+from . import cookies as zhihu_cookies
 from . import signing as zhihu_signing
-
-
-class _ArticleHTML(HTMLParser):
-    """Compare visible text and image sources while tolerating editor-added attributes."""
-    BLOCKS = {'p', 'div', 'figure', 'br', 'li', 'h1', 'h2', 'h3', 'blockquote'}
-
-    def __init__(self, content):
-        super().__init__(convert_charrefs=True)
-        self.parts, self.images = [], []
-        if not isinstance(content, str):
-            raise HTTPFailure('知乎正文响应结构无效', kind='invalid_response')
-        self.feed(content)
-        self.close()
-
-    def handle_data(self, data):
-        self.parts.append(data)
-
-    def handle_starttag(self, tag, attrs):
-        if tag in self.BLOCKS:
-            self.parts.append(' ')
-        if tag == 'img':
-            source = dict(attrs).get('src') or ''
-            if source.startswith('//'):
-                source = 'https:' + source
-            self.images.append(urlsplit(source)._replace(query='', fragment='').geturl())
-
-    def handle_endtag(self, tag):
-        if tag in self.BLOCKS:
-            self.parts.append(' ')
-
-    @property
-    def text(self):
-        return ' '.join(''.join(self.parts).split())
 
 
 class ZhihuWeb:
@@ -108,110 +75,44 @@ class ZhihuWeb:
     def _login_headers(self):
         self.http.session.headers.update({'Referer': self.MAIN + '/signin', 'Origin': self.MAIN})
 
-    def start_login(self, output: Path, *, refresh=False):
-        # This file belongs to the pending login. Never leave an unusable old QR visible.
-        output.unlink(missing_ok=True)
-        try:
-            return self._start_login(output, refresh=refresh)
-        except HTTPFailure:
-            self.login_blocked = True
-            raise
+    @classmethod
+    def import_cookies(cls, source: Path, destination: Path):
+        """从浏览器导出的 Cookie 文件导入知乎登录态并原子保存凭证。
 
-    def _start_login(self, output: Path, *, refresh=False):
-        import qrcode
-        if self.login_blocked:
-            raise HTTPFailure('知乎登录会话被平台拒绝，请先处理平台验证；不会自动重试')
-        self._login_headers()
-        if self.qr_token and self.qr_expires_at <= time.time():
-            self.qr_token = ''
-            self.qr_link = ''
-            self.qr_expires_at = 0
-            refresh = True
-        if not self.qr_token or refresh:
-            # A real browser registers its device id (d_c0) before visiting the sign-in
-            # page. Zhihu may answer /signin with a 3xx anti-bot challenge, but that
-            # response still sets the CSRF token we need; only d_c0 + _xsrf are required
-            # for the QR login API. Tolerate the redirect instead of aborting on it.
-            nav_headers = {k: v for k, v in self.http.session.headers.items()
-                           if k.lower() not in ('x-requested-with', 'origin', 'accept')}
-            nav_headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-            self.http.request('GET', self.MAIN + '/signin', headers=nav_headers,
-                              accepted_statuses={300, 301, 302, 303, 307, 308})
-            self.http.request('POST', self.MAIN + '/udid', headers=nav_headers)
-            xsrf = [cookie.value for cookie in iter_cookies(self.http.session)
-                    if cookie.name == '_xsrf' and cookie.value and not cookie.is_expired()]
-            if not xsrf:
-                raise HTTPFailure('知乎未授予登录 CSRF 会话')
-            self.http.session.headers['x-xsrftoken'] = xsrf[-1]
+        解析浏览器导出的 Cookie 文件（原始 Cookie 头 / Chrome 扩展 JSON /
+        Playwright JSON / Netscape cookies.txt），只保留知乎域名与未过期的
+        z_c0，调用 account() 核验账号登录态，核验成功才写入正式凭证；核验失败
+        不会覆盖已有的有效凭证。导入不保留旧二维码登录状态。
+        """
+        return cls.import_cookie_text(
+            source.read_text(encoding='utf-8', errors='replace'), destination)
 
-            data = self.http.json('POST', self.MAIN + '/api/v3/account/api/login/qrcode')
-            token, link, expiry = data.get('token'), data.get('link'), data.get('expires_at')
-            if (not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', token)
-                    or not isinstance(link, str) or type(expiry) is not int or expiry <= time.time()):
-                raise HTTPFailure('知乎未返回有效二维码或有效期', kind='invalid_response')
-            self.qr_token, self.qr_link, self.qr_expires_at = token, link, expiry
-        # A successful create response alone does not establish a usable login flow.
-        result = self.poll_login()
-        if result['status'] != 'waiting':
-            return result
-        try:
-            parsed = urlsplit(self.qr_link)
-            valid_link = (parsed.scheme == 'https' and parsed.hostname == 'www.zhihu.com'
-                          and not parsed.username and not parsed.password and parsed.port in (None, 443)
-                          and parsed.path == '/account/scan/login/' + self.qr_token)
-        except ValueError:
-            valid_link = False
-        if not valid_link:
-            raise HTTPFailure('知乎二维码地址无效', kind='invalid_response')
-        output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, 'wb') as target:
-            qrcode.make(self.qr_link).save(target, format='PNG')
-        if self.qr_expires_at <= time.time():
-            output.unlink(missing_ok=True)
-            return {'status': 'expired', 'message': '生成图片时二维码已过期，请显式使用 --refresh'}
-        return dict(result, qr_image=str(output), expires_at=self.qr_expires_at)
+    @classmethod
+    def import_cookie_text(cls, text: str, destination: Path):
+        """从 Cookie 文本（而非文件）导入知乎登录态并原子保存凭证。
 
-    def poll_login(self):
-        if self.login_blocked:
-            raise HTTPFailure('知乎登录会话被平台拒绝，不再重复查询')
-        if not re.fullmatch(r'[A-Za-z0-9_-]+', self.qr_token):
-            raise ValueError('请先生成知乎登录二维码')
-        if self.qr_expires_at <= time.time():
-            return {'status': 'expired', 'message': '知乎二维码已过期或缺少有效期，请显式使用 --refresh；不会自动换码'}
+        供终端无回显粘贴（--cookie-stdin）使用；解析、校验与核验逻辑与
+        import_cookies 完全一致。该路径不把 Cookie 明文落盘。
+        """
+        records = zhihu_cookies.parse_cookie_text(text)
+        records = zhihu_cookies.zhihu_records(records)
+        zhihu_cookies.require_login_cookie(records)
+        session = zhihu_cookies.build_session(records)
+        client = cls(session=session, network='direct')
         try:
-            data = self.http.json('GET', self.MAIN + f'/api/v3/account/api/login/qrcode/{self.qr_token}/scan_info', headers={
-                'Referer': self.MAIN + '/signin', 'Accept': '*/*'})
-            HTTP.checked(data)
-            if data.get('access_token'):
-                self.account()
-                self.qr_token, self.qr_link, self.qr_expires_at = '', '', 0
-                self.http.session.headers.update({'Referer': self.COLUMN + '/', 'Origin': self.COLUMN})
-                return {'status': 'authenticated', 'message': '知乎 HTTP 登录成功'}
-            if data.get('new_token'):
-                self.qr_expires_at = 0
-                return {'status': 'expired', 'message': '平台已使旧二维码失效，请显式使用 --refresh'}
-            if type(data.get('status')) is not int or data['status'] not in (0, 1):
-                raise HTTPFailure('知乎扫码响应状态未知，已停止', kind='invalid_response')
-            if self.qr_expires_at <= time.time():
-                return {'status': 'expired', 'message': '查询期间二维码已过期，请显式使用 --refresh'}
-        except HTTPFailure as exc:
-            if exc.code == 40352:
-                # Zhihu gates scan confirmation behind its /account/unhuman anti-bot
-                # check. A real browser on a clean exit passes it; a datacenter/可疑
-                # 出口（TLS 或 IP 声誉）会被拦。这不是账号拒绝，二维码仍有效，保持会话
-                # 可用，提示改用干净出口重试而非必须去浏览器。
-                return {'status': 'waiting',
-                        'message': '扫码被平台安全验证拦下；请用干净出口（--proxy）重试，例如住宅/SOCKS 代理。'}
-            self.login_blocked = True
-            raise
-        return {'status': 'waiting', 'message': '等待知乎 App 扫码确认'}
+            info = client.account()
+            # 只写 Cookie 与账号元数据，不残留任何旧二维码登录字段。
+            client.qr_token, client.qr_link = '', ''
+            client.qr_expires_at, client.login_blocked = 0, False
+            client.save(destination)
+            return info
+        finally:
+            client.close()
 
     def account(self):
         if not any(cookie.name == 'z_c0' and cookie.value and not cookie.is_expired()
                    for cookie in iter_cookies(self.http.session)):
-            raise HTTPFailure('知乎尚无有效登录 Cookie；扫码确认后仍须取得网站登录态', kind='authentication_required')
+            raise HTTPFailure('知乎尚无有效登录 Cookie；请导入浏览器导出的知乎 Cookie 文件', kind='authentication_required')
         result = self.http.json('GET', self.MAIN + '/api/v4/me')
         HTTP.checked(result)
         if not isinstance(result.get('id'), str) or not result['id']:
@@ -279,6 +180,8 @@ class ZhihuWeb:
         for img_path in article.body_images:
             body_img_url = self.upload_image(img_path)
             image_map[str(img_path)] = body_img_url
+            if media_checkpoint:
+                media_checkpoint(self._image_key(body_img_url))
         # ── Render HTML (cover inline at top, then body) ────────────────────
         html = _render_article(article, image_map, cover_first=True, include_title=False)
         self.http.request('PATCH', self.COLUMN + f'/api/articles/{draft_id}/draft', json={
@@ -315,7 +218,9 @@ class ZhihuWeb:
             raise ValueError('知乎文章 ID 必须是数字')
         evidence = dict(evidence or {})
         if expected is not None:
-            evidence.update(content_fingerprint('zhihu', expected.title, expected.body))
+            # 渲染后正文只保留可见文本与独立配图，markdown 图片语法不进入内容，
+            # 指纹须基于剥离图片语法后的正文计算。
+            evidence.update(content_fingerprint('zhihu', expected.title, strip_markdown_images(expected.body)))
         data = self.http.json('GET', self.COLUMN + f'/api/articles/{article_id}')
         HTTP.checked(data)
         url = f'{self.COLUMN}/p/{article_id}'
@@ -335,6 +240,27 @@ class ZhihuWeb:
         verification = 'mismatch' if str(data.get('id')) == article_id and data.get('state') == 'draft' else 'unavailable'
         return PublishResult('pending', f'知乎文章 {article_id} 尚无明确的已发表状态', url, 'zhihu', verification)
 
+    def article_state(self, article_id: str) -> str:
+        """实时单篇状态，供本地台账逐条回查：'published' | 'draft' | 'not_found' | 'unknown'。
+
+        知乎没有"我的已发布文章"列表接口，只能按 ID 查单篇。404 视为已删除，
+        由调用方把它从发布列表移出。
+        """
+        if not article_id.isdigit():
+            raise ValueError('知乎文章 ID 必须是数字')
+        try:
+            data = self.http.json('GET', self.COLUMN + f'/api/articles/{article_id}')
+        except HTTPFailure as exc:
+            if exc.status_code == 404:
+                return 'not_found'
+            raise
+        if isinstance(data, dict) and str(data.get('id')) == article_id:
+            if data.get('state') == 'published':
+                return 'published'
+            if data.get('state') == 'draft':
+                return 'draft'
+        return 'unknown'
+
     def _publish_saved_draft(self, draft_id: str, article: Article, media: list[str]):
         if not draft_id.isdigit():
             raise ValueError('知乎草稿 ID 必须是数字')
@@ -343,7 +269,7 @@ class ZhihuWeb:
         parsed = _ArticleHTML(saved.get('content'))
         if (str(saved.get('id')) != draft_id or not media or any(not key for key in media)
                 or not content_matches('zhihu', saved.get('title', ''), parsed.text,
-                                       content_fingerprint('zhihu', article.title, article.body))
+                                       content_fingerprint('zhihu', article.title, strip_markdown_images(article.body)))
                 or [self._image_key(src) for src in parsed.images] != media):
             raise HTTPFailure('发表前的草稿与原稿或上传图片不一致，已停止')
         options = {
