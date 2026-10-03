@@ -27,7 +27,7 @@ def upload_signature(period: str, file_id: str, size: int, host: str) -> str:
     return hmac.new(key.encode(), message.encode(), hashlib.sha1).hexdigest()
 
 
-def image_payload(article: Article, uploaded: dict) -> dict:
+def image_payload(article: Article, images: list[dict]) -> dict:
     binds = {'version': 1, 'noteId': 0, 'bizType': 0, 'noteOrderBind': {},
              'notePostTiming': {}, 'noteCollectionBind': {'id': ''},
              'noteSketchCollectionBind': {'id': ''}, 'coProduceBind': {'enable': True},
@@ -44,7 +44,7 @@ def image_payload(article: Article, uploaded: dict) -> dict:
         'file_id': 'spectrum/' + uploaded['file_id'], 'width': uploaded['width'], 'height': uploaded['height'],
         'metadata': {'source': -1}, 'stickers': {'version': 2, 'floating': []},
         'extra_info_json': json.dumps({'mimeType': 'image/png', 'image_metadata': {'bg_color': '', 'origin_size': uploaded['size'] / 1024}}),
-    }]}, 'video_info': None}
+    } for uploaded in images]}, 'video_info': None}
 
 
 class XHSHTTP:
@@ -224,14 +224,17 @@ class XHSHTTP:
     def publish(self, article: Article, *, checkpoint=None) -> PublishResult:
         if len(article.title) > 20 or len(article.body) > 1000:
             return PublishResult('failed', '小红书普通图文限标题 20 字、正文 1000 字；请改稿，不会自动截断', platform='xiaohongshu')
+        uploads: list[dict] = []
         try:
-            uploaded = self.upload_image(article.cover)
+            uploads.append(self.upload_image(article.cover))
+            for img_path in article.body_images:
+                uploads.append(self.upload_image(img_path))
         except Exception as exc:
             return PublishResult('failed', f'小红书上传阶段停止：{type(exc).__name__}', platform='xiaohongshu')
         if checkpoint:
-            checkpoint('uploaded', uploaded['file_id'])
+            checkpoint('uploaded', uploads[0]['file_id'])
         try:
-            data = self.call('POST', '/web_api/sns/v2/note', image_payload(article, uploaded), publish=True)
+            data = self.call('POST', '/web_api/sns/v2/note', image_payload(article, uploads), publish=True)
         except Exception as exc:
             return PublishResult('pending', f'小红书提交结果需核验：{type(exc).__name__}；不会自动重发', platform='xiaohongshu')
         identifiers = data.get('data') or {}
@@ -241,7 +244,7 @@ class XHSHTTP:
             checkpoint('submitted', note_id)
         if url:
             try:
-                return self.verify(note_id, expected=article, evidence={'media': [uploaded['file_id']]})
+                return self.verify(note_id, expected=article, evidence={'media': [up['file_id'] for up in uploads]})
             except Exception as exc:
                 return PublishResult('pending', f'小红书已接受提交，回读暂未完成：{type(exc).__name__}；不会重发', url=url, platform='xiaohongshu')
         return PublishResult('pending', '小红书接口已接受提交；公开可见性和审核状态仍需核验', url=url, platform='xiaohongshu')
