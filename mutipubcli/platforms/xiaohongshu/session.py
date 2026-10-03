@@ -94,7 +94,9 @@ def restore_pc_profile(data: dict):
     # Also accept the project-local research snapshot made before CLI integration.
     values = {f.name: data[f.name] for f in fields(PcDeviceProfile) if f.init and f.name in data}
     values['cookies'] = data.get('_cookie_map', data['cookies'])
-    values['session'] = PcSessionState(**values['session'])
+    session_data = dict(values['session'])
+    session_data.pop('security_ready', None)
+    values['session'] = PcSessionState(**session_data)
     values['b1_state'] = B1RuntimeState(**values['b1_state'])
     values['mns_stages'] = {key: MnsStageMaterial(**{**value, 'env_fp_tail': tuple(value['env_fp_tail'])})
                             for key, value in values['mns_stages'].items()}

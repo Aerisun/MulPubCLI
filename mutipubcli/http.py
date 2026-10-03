@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import fcntl
 from contextlib import contextmanager
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
@@ -17,12 +18,33 @@ except ImportError:  # Optional XHS transport is installed by setup_xhs.py.
     CurlRequestException, CurlTimeout = requests.RequestException, requests.Timeout
 
 
-class HTTPFailure(RuntimeError):
-    """Safe error text: never include request URLs, cookies or response bodies."""
+def _safe_target(url: str, *, base_url: str = '') -> str | None:
+    """Return a host/path diagnostic without query strings or long identifiers."""
+    try:
+        parsed = urlsplit(urljoin(base_url, url))
+        path = parsed.path or '/'
+        path = re.sub(r'(/api/v3/account/api/login/qrcode/)[^/]+(?=/scan_info(?:/|$))',
+                      r'\1<redacted>', path)
+        path = re.sub(r'(/account/scan/login/)[^/]+(?=/|$)', r'\1<redacted>', path)
+        path = re.sub(r'(?<=/)[A-Za-z0-9_-]{24,}(?=/|$)', '<redacted>', path)
+        path = re.sub(r'(?<=/)\d{8,}(?=/|$)', '<redacted>', path)
+        path = path[:256]
+        host = parsed.hostname
+    except (TypeError, ValueError):
+        return None
+    return f'{host}{path}' if host else path
 
-    def __init__(self, message: str, *, kind: str = 'http_error', status_code=None, code=None):
+
+class HTTPFailure(RuntimeError):
+    """Safe diagnostics omit full URLs, query strings, cookies and response bodies."""
+
+    def __init__(self, message: str, *, kind: str = 'http_error', status_code=None, code=None,
+                 request_method=None, request_target=None, redirect_target=None):
         super().__init__(message)
         self.kind, self.status_code, self.code = kind, status_code, code
+        self.request_method = request_method
+        self.request_target = request_target
+        self.redirect_target = redirect_target
 
     def as_dict(self):
         result = {'status': 'failed', 'kind': self.kind, 'message': str(self)}
@@ -30,10 +52,17 @@ class HTTPFailure(RuntimeError):
             result['http_status'] = self.status_code
         if self.code is not None:
             result['platform_code'] = self.code
+        if self.request_method is not None:
+            result['request_method'] = self.request_method
+        if self.request_target is not None:
+            result['request_target'] = self.request_target
+        if self.redirect_target is not None:
+            result['redirect_target'] = self.redirect_target
         return result
 
     @classmethod
-    def rejected(cls, status_code: int, payload=None):
+    def rejected(cls, status_code: int, payload=None, *, request_method=None, request_url=None,
+                 redirect_location=None):
         error = payload.get('error') if isinstance(payload, dict) else None
         code = error.get('code') if isinstance(error, dict) else None
         code = code if type(code) is int else None
@@ -43,7 +72,12 @@ class HTTPFailure(RuntimeError):
         if code == 40352:
             kind = 'verification_required'
         suffix = f'，平台代码 {code}' if code is not None else ''
-        return cls(f'HTTP {status_code}{suffix}；已停止请求，不自动重试', kind=kind, status_code=status_code, code=code)
+        request_target = _safe_target(request_url) if request_url else None
+        redirect_target = (_safe_target(redirect_location, base_url=request_url)
+                           if redirect_location and request_url else None)
+        return cls(f'HTTP {status_code}{suffix}；已停止请求，不自动重试', kind=kind,
+                   status_code=status_code, code=code, request_method=request_method,
+                   request_target=request_target, redirect_target=redirect_target)
 
 
 class HTTP:
@@ -80,7 +114,14 @@ class HTTP:
                     payload = response.json()
                 except ValueError:
                     payload = None
-                raise HTTPFailure.rejected(response.status_code, payload)
+                raise HTTPFailure.rejected(
+                    response.status_code,
+                    payload,
+                    request_method=method if 300 <= response.status_code < 400 else None,
+                    request_url=url if 300 <= response.status_code < 400 else None,
+                    redirect_location=response.headers.get('Location')
+                    if 300 <= response.status_code < 400 else None,
+                )
         return response
 
     def json(self, method: str, url: str, **kwargs) -> dict:
@@ -137,8 +178,15 @@ def save_session(path: Path, session, **metadata) -> None:
     cookies = [{key: getattr(cookie, key) for key in (
         'name', 'value', 'domain', 'path', 'secure', 'expires',
         'domain_specified', 'domain_initial_dot', 'path_specified',
-    )} for cookie in session.cookies]
+    )} for cookie in iter_cookies(session)]
     private_json(path, {'cookies': cookies, **metadata})
+
+
+def iter_cookies(session_or_cookies):
+    """Iterate Cookie objects from Requests and curl_cffi cookie containers."""
+    cookies = getattr(session_or_cookies, 'cookies', session_or_cookies)
+    jar = getattr(cookies, 'jar', None)
+    return iter(jar if jar is not None else cookies)
 
 
 def load_session(path: Path, hosts: set[str]):

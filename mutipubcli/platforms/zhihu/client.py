@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 from PIL import Image
 
 from mutipubcli.core import Article, PublishResult, content_fingerprint, content_matches
-from mutipubcli.http import HTTP, HTTPFailure, load_session, save_session
+from mutipubcli.http import HTTP, HTTPFailure, iter_cookies, load_session, save_session
 from mutipubcli.renderer import render as _render_article
 from . import signing as zhihu_signing
 
@@ -68,9 +68,12 @@ class ZhihuWeb:
         self.network, self.account_id = network, ''
         self.http = HTTP(self.HOSTS, session=session)
         self.http.session.trust_env = network == 'environment'
-        self.http.session.headers.update({'User-Agent': user_agent, 'Accept': 'application/json, text/plain, */*',
+        if 'User-Agent' not in self.http.session.headers:
+            self.http.session.headers['User-Agent'] = user_agent
+        self.http.session.headers.update({'Accept': 'application/json, text/plain, */*',
             'Accept-Language': 'zh-CN,zh;q=0.9', 'Referer': self.COLUMN + '/', 'Origin': self.COLUMN, 'x-requested-with': 'fetch'})
-        xsrf = [c.value for c in self.http.session.cookies if c.name == '_xsrf']
+        xsrf = [cookie.value for cookie in iter_cookies(self.http.session)
+                if cookie.name == '_xsrf' and cookie.value and not cookie.is_expired()]
         if xsrf:
             self.http.session.headers['x-xsrftoken'] = xsrf[-1]
         self.qr_token = ''
@@ -122,7 +125,8 @@ class ZhihuWeb:
             self.http.request('GET', self.MAIN + '/signin', headers={
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'})
             self.http.request('POST', self.MAIN + '/udid')
-            xsrf = [cookie.value for cookie in self.http.session.cookies if cookie.name == '_xsrf']
+            xsrf = [cookie.value for cookie in iter_cookies(self.http.session)
+                    if cookie.name == '_xsrf' and cookie.value and not cookie.is_expired()]
             if not xsrf:
                 raise HTTPFailure('知乎未授予登录 CSRF 会话')
             self.http.session.headers['x-xsrftoken'] = xsrf[-1]
@@ -184,7 +188,8 @@ class ZhihuWeb:
         return {'status': 'waiting', 'message': '等待知乎 App 扫码确认'}
 
     def account(self):
-        if not any(cookie.name == 'z_c0' and cookie.value and not cookie.is_expired() for cookie in self.http.session.cookies):
+        if not any(cookie.name == 'z_c0' and cookie.value and not cookie.is_expired()
+                   for cookie in iter_cookies(self.http.session)):
             raise HTTPFailure('知乎尚无有效登录 Cookie；扫码确认后仍须取得网站登录态', kind='authentication_required')
         result = self.http.json('GET', self.MAIN + '/api/v4/me')
         HTTP.checked(result)
