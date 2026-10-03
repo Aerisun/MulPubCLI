@@ -1,0 +1,6 @@
+{
+  "status": "failed",
+  "kind": "redirected",
+  "message": "HTTP 302；已停止请求，不自动重试",
+  "http_status": 302
+}

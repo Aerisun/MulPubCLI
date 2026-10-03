@@ -1,5 +1,5 @@
 """Load the pinned local protocol source and serialize its device session as JSON."""
-from dataclasses import asdict, fields, MISSING
+from dataclasses import asdict, fields
 from pathlib import Path
 import subprocess
 import sys
@@ -27,36 +27,8 @@ def load_source(source: Path) -> Path:
     if str(source) not in sys.path:
         sys.path.insert(0, str(source))
         
-    # Monkey-patch 'requests' with curl_cffi for XHS api camouflage
-    try:
-        from curl_cffi import requests as crequests
-        class PatchedRequests:
-            @staticmethod
-            def get(*args, **kwargs):
-                kwargs.setdefault('impersonate', 'chrome124')
-                return crequests.get(*args, **kwargs)
-            @staticmethod
-            def post(*args, **kwargs):
-                kwargs.setdefault('impersonate', 'chrome124')
-                return crequests.post(*args, **kwargs)
-            @staticmethod
-            def request(*args, **kwargs):
-                kwargs.setdefault('impersonate', 'chrome124')
-                return crequests.request(*args, **kwargs)
-            @staticmethod
-            def Session(*args, **kwargs):
-                kwargs.setdefault('impersonate', 'chrome124')
-                return crequests.Session(*args, **kwargs)
-            
-            # Forward everything else to crequests
-            def __getattr__(self, name):
-                return getattr(crequests, name)
-                
-        sys.modules['requests'] = PatchedRequests()
-    except ImportError:
-        pass
-        
     return source
+
 
 
 def dump_profile(profile) -> dict:
