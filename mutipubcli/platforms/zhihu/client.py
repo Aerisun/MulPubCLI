@@ -66,6 +66,9 @@ class ZhihuWeb:
         if network not in ('direct', 'environment'):
             raise ValueError('知乎网络模式须为 direct 或 environment')
         self.network, self.account_id = network, ''
+        if session is None:
+            import requests as _requests
+            session = _requests.Session()
         self.http = HTTP(self.HOSTS, session=session)
         self.http.session.trust_env = network == 'environment'
         if 'User-Agent' not in self.http.session.headers:

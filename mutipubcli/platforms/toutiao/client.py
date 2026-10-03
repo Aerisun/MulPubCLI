@@ -15,7 +15,7 @@ from urllib.parse import urljoin, urlsplit
 from PIL import Image
 
 from mutipubcli.core import Article, PublishResult, content_fingerprint, content_matches
-from mutipubcli.http import HTTP, HTTPFailure, load_session, save_session
+from mutipubcli.http import HTTP, HTTPFailure, iter_cookies, load_session, save_session
 from mutipubcli.renderer import render as _render_article
 
 
@@ -199,7 +199,7 @@ class ToutiaoWeb:
     def account(self):
         self._guard()
         if not any(c.name in ('sessionid', 'sessionid_ss', 'sid_tt') and c.value and not c.is_expired()
-                   for c in self.http.session.cookies):
+                   for c in iter_cookies(self.http.session)):
             raise HTTPFailure('头条尚无有效登录 Cookie，请先扫码或导入会话', kind='authentication_required')
         data = self.call('GET', '/mp/agw/media/user_login_status_api')
         if data.get('is_login') is not True:

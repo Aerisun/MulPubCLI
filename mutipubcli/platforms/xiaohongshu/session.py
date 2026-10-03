@@ -1,5 +1,5 @@
 """Load the pinned local protocol source and serialize its device session as JSON."""
-from dataclasses import asdict, fields
+from dataclasses import asdict, fields, MISSING
 from pathlib import Path
 import subprocess
 import sys
@@ -72,17 +72,23 @@ def dump_profile(profile) -> dict:
     return result
 
 
+def _filter_dc(cls, data: dict) -> dict:
+    """Keep only keys that *cls* actually accepts as __init__ arguments."""
+    allowed = {f.name for f in fields(cls) if f.init}
+    return {k: v for k, v in data.items() if k in allowed}
+
+
 def restore_profile(data: dict):
     from xhs_utils.xhs_creator.state import CreatorDeviceProfile, CreatorSessionState, CreatorB1RuntimeState, CreatorMnsMaterial
     values = dict(data)
     runtime = values.pop('runtime', {})
-    values['session'] = CreatorSessionState(**values['session'])
-    values['b1_state'] = CreatorB1RuntimeState(**values['b1_state'])
+    values['session'] = CreatorSessionState(**_filter_dc(CreatorSessionState, values['session']))
+    values['b1_state'] = CreatorB1RuntimeState(**_filter_dc(CreatorB1RuntimeState, values['b1_state']))
     for name in ('mns_stages', 'mns_profiles'):
-        values[name] = {key: CreatorMnsMaterial(**{**material, 'env_fp_tail': tuple(material['env_fp_tail'])})
+        values[name] = {key: CreatorMnsMaterial(**_filter_dc(CreatorMnsMaterial, {**material, 'env_fp_tail': tuple(material['env_fp_tail'])}))
                         for key, material in values[name].items()}
-    profile = CreatorDeviceProfile(**values)
-    profile._named_b1_states = {key: CreatorB1RuntimeState(**value) for key, value in runtime.get('named_states', {}).items()}
+    profile = CreatorDeviceProfile(**_filter_dc(CreatorDeviceProfile, values))
+    profile._named_b1_states = {key: CreatorB1RuntimeState(**_filter_dc(CreatorB1RuntimeState, value)) for key, value in runtime.get('named_states', {}).items()}
     profile._named_b1_values = runtime.get('named_values', {})
     profile._b1_state_explicit = runtime.get('explicit', False)
     profile._mns_stage_overrides = set(runtime.get('overrides', []))
@@ -94,15 +100,13 @@ def restore_pc_profile(data: dict):
     # Also accept the project-local research snapshot made before CLI integration.
     values = {f.name: data[f.name] for f in fields(PcDeviceProfile) if f.init and f.name in data}
     values['cookies'] = data.get('_cookie_map', data['cookies'])
-    session_data = dict(values['session'])
-    session_data.pop('security_ready', None)
-    values['session'] = PcSessionState(**session_data)
-    values['b1_state'] = B1RuntimeState(**values['b1_state'])
-    values['mns_stages'] = {key: MnsStageMaterial(**{**value, 'env_fp_tail': tuple(value['env_fp_tail'])})
+    values['session'] = PcSessionState(**_filter_dc(PcSessionState, values['session']))
+    values['b1_state'] = B1RuntimeState(**_filter_dc(B1RuntimeState, values['b1_state']))
+    values['mns_stages'] = {key: MnsStageMaterial(**_filter_dc(MnsStageMaterial, {**value, 'env_fp_tail': tuple(value['env_fp_tail'])}))
                             for key, value in values['mns_stages'].items()}
-    profile = PcDeviceProfile(**values)
+    profile = PcDeviceProfile(**_filter_dc(PcDeviceProfile, values))
     runtime = data.get('runtime', {})
-    profile._named_b1_states = {key: B1RuntimeState(**value) for key, value in
+    profile._named_b1_states = {key: B1RuntimeState(**_filter_dc(B1RuntimeState, value)) for key, value in
         runtime.get('named_states', data.get('_named_b1_states', {})).items()}
     profile._named_b1_values = runtime.get('named_values', data.get('_named_b1_values', {}))
     return profile
