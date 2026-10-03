@@ -1,17 +1,15 @@
 import json
-import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from urllib.parse import urlsplit
 from unittest.mock import patch
 
 import requests
 from curl_cffi import requests as curl_requests
 
-from mutipubcli.http import HTTP, HTTPFailure, save_session
-from mutipubcli.platforms.toutiao.client import ToutiaoWeb
-from mutipubcli.platforms.zhihu.client import ZhihuWeb
+from mulpubcli.http import HTTP, HTTPFailure, save_session
+from mulpubcli.platforms.toutiao.client import ToutiaoWeb
+from mulpubcli.platforms.zhihu.client import ZhihuWeb
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -39,29 +37,6 @@ class RedirectSession:
             302,
             headers={'Location': '/account/unhuman?next=private-value'},
         )
-
-
-class ScriptedZhihuSession(curl_requests.Session):
-    def __init__(self, token):
-        super().__init__(impersonate='chrome124')
-        self.token = token
-        self.calls = []
-
-    def request(self, method, url, **kwargs):
-        path = urlsplit(url).path
-        self.calls.append((method, path, dict(self.headers), kwargs))
-        if method == 'GET' and path == '/signin':
-            self.cookies.set('_xsrf', 'test-xsrf', domain='.zhihu.com', path='/')
-            return FakeResponse()
-        if method == 'POST' and path == '/udid':
-            return FakeResponse()
-        if method == 'POST' and path == '/api/v3/account/api/login/qrcode':
-            return FakeResponse(payload={
-                'token': self.token,
-                'link': f'https://www.zhihu.com/account/scan/login/{self.token}',
-                'expires_at': int(time.time()) + 120,
-            })
-        raise AssertionError(f'unexpected request: {method} {path}')
 
 
 class HTTPAndZhihuLoginTests(unittest.TestCase):
@@ -102,28 +77,14 @@ class HTTPAndZhihuLoginTests(unittest.TestCase):
             finally:
                 session.close()
 
-    def test_zhihu_login_uses_signin_bootstrap_and_curl_cffi_xsrf_cookie(self):
-        token = 'AbCdEf0123456789ABCDEFGHIJKLMNOP'
-        session = ScriptedZhihuSession(token)
-        client = ZhihuWeb(session=session)
+    def test_zhihu_defaults_to_curl_cffi_chrome_session(self):
+        # 知乎登录默认应使用 curl_cffi 伪装真实 Chrome 的 TLS 指纹，而不是裸 requests，
+        # 否则 TLS 特征会被知乎 WAF 判为非浏览器并引导到 /account/unhuman。
+        client = ZhihuWeb()
         try:
-            with TemporaryDirectory(dir=PROJECT_ROOT) as temp_dir:
-                qr_path = Path(temp_dir) / 'zhihu.png'
-                with patch.object(client, 'poll_login', return_value={
-                    'status': 'waiting', 'message': 'waiting',
-                }):
-                    result = client.start_login(qr_path)
-                self.assertTrue(qr_path.exists())
-
-            self.assertEqual([call[1] for call in session.calls], [
-                '/signin',
-                '/udid',
-                '/api/v3/account/api/login/qrcode',
-            ])
-            self.assertEqual(session.headers['Referer'], 'https://www.zhihu.com/signin')
-            self.assertEqual(session.headers['Origin'], 'https://www.zhihu.com')
-            self.assertEqual(session.headers['x-xsrftoken'], 'test-xsrf')
-            self.assertEqual(result['status'], 'waiting')
+            self.assertIsInstance(client.http.session, curl_requests.Session)
+            self.assertEqual(getattr(client.http.session, 'impersonate', ''), 'chrome146')
+            self.assertNotIsInstance(client.http.session, requests.Session)
         finally:
             client.close()
 

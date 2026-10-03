@@ -1,6 +1,6 @@
-# MutiPubCli
+# MulPubCLI
 
-MutiPubCli 是一个 HTTP 原生自动化文章发布命令行工具，当前支持小红书、知乎、今日头条。
+MulPubCLI 是一个 HTTP 原生自动化文章发布命令行工具，当前支持小红书、知乎、今日头条。
 
 主要特性：
 - **纯 HTTP 驱动**：无头浏览器依赖，极小的资源占用与更快的执行速度。
@@ -26,11 +26,11 @@ MutiPubCli 是一个 HTTP 原生自动化文章发布命令行工具，当前支
 ## 目录结构
 
 ```
-Mutipubcli/
+MulPubCLI/
 ├── docs/                # 文档与手册
 │   ├── cli.md
 │   └── publishing.md
-├── mutipubcli/          # 核心代码
+├── mulpubcli/          # 核心代码
 │   ├── platforms/       # 各平台独立适配层
 │   │   ├── xiaohongshu/
 │   │   ├── zhihu/

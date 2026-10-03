@@ -7,7 +7,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from mutipubcli.http import HTTPFailure
+from mulpubcli.http import HTTPFailure
 
 
 def creator_params(auth, api, data='', method='POST', *, include_client_hints=False,

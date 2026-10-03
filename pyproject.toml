@@ -3,12 +3,13 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mutipubcli"
+name = "mulpubcli"
 version = "1.0.0"
 description = "小红书/知乎/今日头条三平台 HTTP 原生自动化发布 CLI"
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31",
+    "PySocks>=1.7",
     "Pillow>=10.0.0",
     "qrcode>=7.0",
     "curl_cffi>=0.7",
@@ -18,8 +19,8 @@ dependencies = [
 ]
 
 [project.scripts]
-mutipubcli = "mutipubcli.__main__:main_cli"
+mulpubcli = "mulpubcli.__main__:main_cli"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["mutipubcli*"]
+include = ["mulpubcli*"]

@@ -8,15 +8,16 @@ import math
 import os
 import re
 import time
+from datetime import datetime
 from html import escape
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
 from PIL import Image
 
-from mutipubcli.core import Article, PublishResult, content_fingerprint, content_matches
-from mutipubcli.http import HTTP, HTTPFailure, iter_cookies, load_session, save_session
-from mutipubcli.renderer import render as _render_article
+from mulpubcli.core import Article, PublishResult, content_fingerprint, content_matches, strip_markdown_images
+from mulpubcli.http import HTTP, HTTPFailure, iter_cookies, load_session, save_session
+from mulpubcli.renderer import render as _render_article, _ArticleHTML
 
 
 PLATFORM = 'toutiao'
@@ -406,13 +407,67 @@ class ToutiaoWeb:
                 break
         return None
 
+    def list_articles(self, *, draft=False) -> list[dict]:
+        # Reuses the same graphic-editor articles feed pagination as find_article,
+        # but collects every entry instead of stopping at the first id match.
+        found: list[dict] = []
+        for page in range(1, 6):
+            params = {'provider_type': 'mp_provider', 'aid': '13', 'app_name': 'news_article',
+                'category': 'mp_article', 'channel': '', 'stream_api_version': '88',
+                'genre_type_switch': json.dumps({'repost': 1, 'small_video': 1, 'toutiao_graphic': 1,
+                    'weitoutiao': 1, 'xigua_video': 1}), 'device_platform': 'pc', 'platform_id': '0',
+                'visited_uid': self.user_id, 'offset': str((page - 1) * 20), 'count': '20', 'keyword': '',
+                'client_extra_params': json.dumps({'category': 'mp_article', 'real_app_id': '1231',
+                    'need_forward': 'true', 'offset_mode': '1', 'page_index': str(page),
+                    'status': '9' if draft else '0', 'source': '0'})}
+            payload = self.call('GET', '/api/feed/mp_provider/v1/', raw=True, params=params,
+                headers={'Content-Type': 'application/json', 'RPC-PERSIST-BYTETIM_BUSINESS_STREAM_CALLER': 'mp'})
+            if 'code' in payload:
+                self._checked(payload)  # Recognize/latch conventional error envelopes too.
+            # Same benign 20100 authenticated-feed envelope tolerated in find_article.
+            benign = (payload.get('errno') == 20100 and payload.get('login_status') == 1
+                      and payload.get('message') == 'success')
+            if not benign:
+                info = payload.get('api_base_info') or {}
+                code = payload.get('errno', info.get('status_code'))
+                self._checked({'code': code, 'data': {}})
+            items = payload.get('data')
+            if not isinstance(items, list) or type(payload.get('has_more')) is not bool:
+                raise HTTPFailure('头条作品列表结构待核对，停止核验', kind='invalid_response')
+            for item in items:
+                try:
+                    encoded = item.get('content') or item['assembleCell']['itemCell']['extra']['origin_content']
+                    content = self._snake_keys(json.loads(encoded))
+                    attr = content['article_attr']
+                    cell = self._snake_keys(json.loads(attr['pgc_cell']))
+                    pgc_id = identifier(cell.get('pgc_id'))
+                    if not pgc_id:
+                        raise HTTPFailure('头条作品列表条目结构待核对，停止核验', kind='invalid_response')
+                    title = item.get('title') or cell.get('title') or ''
+                    if not isinstance(title, str):
+                        raise HTTPFailure('头条作品列表条目结构待核对，停止核验', kind='invalid_response')
+                    item_id = identifier(cell.get('item_id')) or None
+                    created = attr.get('create_time')
+                    published_at = None
+                    if isinstance(created, (int, float)) and created:
+                        published_at = datetime.fromtimestamp(created).strftime('%Y-%m-%d %H:%M')
+                    found.append({'id': pgc_id, 'title': title, 'status': attr['status'],
+                                  'item_id': item_id, 'published_at': published_at})
+                except (KeyError, TypeError, ValueError, AttributeError):
+                    raise HTTPFailure('头条作品列表条目结构待核对，停止核验', kind='invalid_response') from None
+            if not payload['has_more']:
+                break
+        return found
+
     def verify(self, article_id: str, *, expected=None, evidence=None, draft=False):
         if not identifier(article_id):
             raise ValueError('头条文章 ID 无效')
         self.account()
         proof = dict(evidence or {})
         if expected is not None:
-            proof.update(content_fingerprint(PLATFORM, expected.title, expected.body))
+            # 渲染后正文只保留可见文本与独立配图，markdown 图片语法不进入内容；
+            # 与小红书一致，指纹须基于剥离图片语法后的正文计算。
+            proof.update(content_fingerprint(PLATFORM, expected.title, strip_markdown_images(expected.body)))
         if not proof.get('sha256') or not proof.get('media'):
             return PublishResult('pending', '缺少原稿或上传图片证据，无法完整核验', platform=PLATFORM, verification='missing_evidence')
         item = self.find_article(article_id, draft=draft)
@@ -432,7 +487,8 @@ class ToutiaoWeb:
         cover_ids = [v.get('uri') for v in covers if isinstance(v, dict)] if isinstance(covers, list) else []
         if (identifier(data.get('pgc_id')) != article_id or identifier(data.get('media_id')) != self.account_id
                 or not content_matches(PLATFORM, data.get('title', ''), html.text, proof)
-                or [image_identity(src) for src in html.images] != proof['media'] or cover_ids != proof['media']):
+                or [image_identity(src) for src in html.images] != proof['media']
+                or cover_ids != proof['media'][:1]):
             return PublishResult('pending', '头条标题、完整正文、配图、封面或账号未通过核对', platform=PLATFORM, verification='mismatch')
         item_id = identifier(item.get('item_id'))
         if draft:
@@ -458,10 +514,12 @@ class ToutiaoWeb:
 
         # ── Upload body images ──────────────────────────────────────────────
         image_map: dict[str, str] = {str(article.cover): image['url']}
+        media_uris: list[str] = [image['uri']]  # cover first, then body in document order
         for img_path in article.body_images:
             try:
                 body_img = self.upload_image(img_path)
                 image_map[str(img_path)] = body_img['url']
+                media_uris.append(body_img['uri'])
             except Exception as exc:
                 return PublishResult('failed',
                     f'头条正文图片上传停止（{img_path.name}）：{type(exc).__name__}；尚未投稿',
@@ -480,7 +538,7 @@ class ToutiaoWeb:
                 return PublishResult('pending', '头条未返回有效文章 ID；请核验，不会重发', platform=PLATFORM)
             if checkpoint:
                 checkpoint('submitted' if public else 'draft', article_id)
-            return self.verify(article_id, expected=article, evidence={'media': [image['uri']]}, draft=not public)
+            return self.verify(article_id, expected=article, evidence={'media': media_uris}, draft=not public)
         except HTTPFailure as exc:
             if exc.kind == 'account_setup_required' and not article_id:
                 return PublishResult('failed', str(exc), platform=PLATFORM)

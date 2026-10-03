@@ -18,6 +18,18 @@ except ImportError:  # Optional XHS transport is installed by setup_xhs.py.
     CurlRequestException, CurlTimeout = requests.RequestException, requests.Timeout
 
 
+def chrome_session(impersonate: str = 'chrome146'):
+    """A curl_cffi session impersonating a real Chrome TLS fingerprint.
+
+    与小红书已验证的传输模式一致（TLS 伪装 + HTTP/2 over TLS），用于让知乎等平台在
+    登录/投稿时呈现真实浏览器指纹，避免被平台按 TLS 特征判为非浏览器。保留会话 cookie
+    的自动存取（知乎登录依赖会话内 d_c0/_xsrf/z_c0），故不使用 XHS 的 discard_cookies。
+    """
+    from curl_cffi import requests as curl_requests
+    return curl_requests.Session(impersonate=impersonate, default_headers=False,
+                                 http_version='v2tls')
+
+
 def _safe_target(url: str, *, base_url: str = '') -> str | None:
     """Return a host/path diagnostic without query strings or long identifiers."""
     try:
@@ -181,6 +193,24 @@ def iter_cookies(session_or_cookies):
     return iter(jar if jar is not None else cookies)
 
 
+def add_cookies(session, items) -> None:
+    """Add normalized cookie records to a Requests-compatible session.
+
+    items 是结构如 {'name','value','domain','path','secure','expires'} 的记录字典。
+    这是 load_session 与浏览器 Cookie 导入（zhihu/cookies.py）共用的会话注入逻辑，
+    避免两处重复实现。Playwright 用 -1 表示不设过期时间的浏览器会话 Cookie。
+    """
+    for item in items:
+        values = {key: item[key] for key in ('name', 'value', 'domain', 'path', 'secure', 'expires') if key in item}
+        if values.get('expires') == -1:
+            values['expires'] = None
+        cookie = requests.cookies.create_cookie(**values)
+        for key in ('domain_specified', 'domain_initial_dot', 'path_specified'):
+            if key in item:
+                setattr(cookie, key, item[key])
+        session.cookies.set_cookie(cookie)
+
+
 def load_session(path: Path, hosts: set[str]):
     if path.stat().st_mode & 0o077:
         raise ValueError('凭证文件权限过宽，请设为 600')
@@ -188,6 +218,7 @@ def load_session(path: Path, hosts: set[str]):
     if not isinstance(data, dict) or not isinstance(data.get('cookies', []), list):
         raise ValueError('凭证文件结构无效')
     session = requests.Session()
+    items = []
     for item in data.pop('cookies', []):
         if not isinstance(item, dict) or not isinstance(item.get('domain'), str):
             raise ValueError('Cookie 结构无效')
@@ -196,12 +227,6 @@ def load_session(path: Path, hosts: set[str]):
             continue
         if any(not isinstance(item.get(key), str) or '\r' in item[key] or '\n' in item[key] for key in ('name', 'value')):
             raise ValueError('Cookie 名称或值无效')
-        values = {key: item[key] for key in ('name', 'value', 'domain', 'path', 'secure', 'expires') if key in item}
-        if values.get('expires') == -1:
-            values['expires'] = None  # Playwright uses -1 for a non-expiring browser-session cookie.
-        cookie = requests.cookies.create_cookie(**values)
-        for key in ('domain_specified', 'domain_initial_dot', 'path_specified'):
-            if key in item:
-                setattr(cookie, key, item[key])
-        session.cookies.set_cookie(cookie)
+        items.append(item)
+    add_cookies(session, items)
     return session, data

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import requests
 
-from mutipubcli.http import HTTPFailure
+from mulpubcli.http import HTTPFailure
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / '.dev/references/zhihu-web/module-1514.js'

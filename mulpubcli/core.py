@@ -1,4 +1,4 @@
-"""mutipubcli.core — 共享数据模型。
+"""mulpubcli.core — 共享数据模型。
 
 Article
     title       : str          — 文章标题（从 Markdown 第一行 # 提取）
@@ -24,6 +24,10 @@ from pathlib import Path
 # Regex to detect Markdown image syntax: ![alt](src)
 _MD_IMG_RE = re.compile(r'!\[[^\]]*\]\(([^)]+)\)')
 
+# Regex to detect a cover directive line: <!-- cover: path -->
+# Matches a full standalone line (trims surrounding whitespace), not inline/cross-line.
+_COVER_RE = re.compile(r'^\s*<!--\s*cover\s*:\s*(.+?)\s*-->\s*$')
+
 
 def _is_local(src: str) -> bool:
     return not src.startswith(('http://', 'https://', 'data:'))
@@ -44,42 +48,69 @@ def _extract_body_images(body: str, base_dir: Path) -> tuple[Path, ...]:
     return tuple(seen.values())
 
 
+def strip_markdown_images(text: str) -> str:
+    """Remove Markdown image syntax ``![alt](src)`` from plain text.
+
+    面向把图片单独放图集、正文只存纯文本的平台（如小红书），正文不应回显
+    Markdown 图片语法。仅删除图片标记，保留周围正文与换行结构。
+    """
+    return _MD_IMG_RE.sub('', text)
+
+
 @dataclass(frozen=True)
 class Article:
     title: str
     body: str                           # Raw Markdown (no title line)
     cover: Path                         # Cover image, absolute
     body_images: tuple[Path, ...] = field(default_factory=tuple)  # In-body local images
+    source_dir: Path | None = field(default=None)  # Markdown file dir, for relative image resolution
 
     @classmethod
-    def load(cls, source: Path, cover: Path) -> Article:
+    def load(cls, source: Path) -> Article:
         source = source.resolve()
-        cover  = cover.resolve()
+        base_dir = source.parent
 
         if not source.is_file():
             raise ValueError(f"稿件不存在：{source}")
-        if not cover.is_file():
-            raise ValueError(f"封面图不存在：{cover}")
 
         lines = source.read_text(encoding="utf-8").strip().splitlines()
         if not lines or not lines[0].startswith("# "):
             raise ValueError("稿件第一行须为 Markdown 一级标题（# 标题）")
 
         title = lines[0][2:].strip()
-        body  = "\n".join(lines[1:]).strip()
+
+        # Scan for the cover directive line and remove it from the body.
+        # 封面只能来自稿件内 <!-- cover: 路径 --> 指令，无独立 --cover 参数。
+        cover: Path | None = None
+        kept_lines: list[str] = []
+        for line in lines[1:]:
+            m = _COVER_RE.fullmatch(line.strip())
+            if m is not None and cover is None:
+                raw = m.group(1).strip()
+                p = Path(raw) if Path(raw).is_absolute() else (base_dir / raw)
+                cover = p.resolve()
+            else:
+                kept_lines.append(line)
+
+        body = "\n".join(kept_lines).strip()
 
         if not title:
             raise ValueError("标题不能为空")
         if not body:
             raise ValueError("正文不能为空")
 
-        body_images = _extract_body_images(body, base_dir=source.parent)
+        if cover is None:
+            raise ValueError("未指定封面：请在稿件里加 <!-- cover: 路径 -->")
+        if not cover.is_file():
+            raise ValueError(f"封面图不存在：{cover}")
+
+        body_images = _extract_body_images(body, base_dir=base_dir)
         # Validate that all referenced local images actually exist
         missing = [str(p) for p in body_images if not p.is_file()]
         if missing:
             raise ValueError(f"正文中以下本地图片不存在：{', '.join(missing)}")
 
-        return cls(title=title, body=body, cover=cover, body_images=body_images)
+        return cls(title=title, body=body, cover=cover, body_images=body_images, source_dir=base_dir)
 
     def all_images(self) -> tuple[Path, ...]:
         """Cover first, then body images in order — all unique local image paths."""

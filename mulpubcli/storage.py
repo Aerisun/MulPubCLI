@@ -1,4 +1,4 @@
-"""mutipubcli.storage — 内部文件存储规划，统一管理所有路径与临时文件。
+"""mulpubcli.storage — 内部文件存储规划，统一管理所有路径与临时文件。
 
 目录约定（相对于项目根，即 pyproject.toml 所在目录）：
 
@@ -38,7 +38,7 @@ def _project_root() -> Path:
 
 
 class StorageLayout:
-    """Single source of truth for all file paths used by mutipubcli."""
+    """Single source of truth for all file paths used by mulpubcli."""
 
     def __init__(self, root: Path | None = None):
         self.root = root or _project_root()
