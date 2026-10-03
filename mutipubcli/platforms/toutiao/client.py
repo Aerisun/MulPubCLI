@@ -148,6 +148,10 @@ class ToutiaoWeb:
         if not isinstance(payload, dict) or type(payload.get(key)) is not int:
             raise HTTPFailure('头条响应缺少明确业务状态，停止操作', kind='invalid_response')
         code = payload[key]
+        # 20100 是 mp feed/回读接口的已认证正常标记（见 find_article），绝不是拒绝，
+        # 也不能据此锁定会话。错把它当拒绝会让已成功的发布误报"拒绝请求"并封禁整个会话。
+        if not sso and code == 20100:
+            return payload.get('data')
         if code != 0:
             data = payload.get('data')
             if mobile_rejection and code == 2103 and isinstance(data, dict) and type(data.get('pgc_id')) in (str, int) and str(data['pgc_id']) == '0':
@@ -375,15 +379,15 @@ class ToutiaoWeb:
                 headers={'Content-Type': 'application/json', 'RPC-PERSIST-BYTETIM_BUSINESS_STREAM_CALLER': 'mp'})
             if 'code' in payload:
                 self._checked(payload)  # Recognize/latch conventional error envelopes too.
-            # Observed authenticated empty feed uses errno=20100, login_status=1.
-            # Only that exact empty shape is accepted as no matching item, never as a publication.
-            if (payload.get('errno') == 20100 and payload.get('message') == 'success'
-                    and payload.get('login_status') == 1 and payload.get('data') == []
-                    and payload.get('has_more') is False):
-                return None
-            info = payload.get('api_base_info') or {}
-            code = payload.get('errno', info.get('status_code'))
-            self._checked({'code': code, 'data': {}})
+            # Observed authenticated feed envelope is errno=20100, login_status=1,
+            # message="success" regardless of whether data is empty or populated.
+            # That exact shape is accepted as a normal authenticated read, never a rejection.
+            benign = (payload.get('errno') == 20100 and payload.get('login_status') == 1
+                      and payload.get('message') == 'success')
+            if not benign:
+                info = payload.get('api_base_info') or {}
+                code = payload.get('errno', info.get('status_code'))
+                self._checked({'code': code, 'data': {}})
             items = payload.get('data')
             if not isinstance(items, list) or type(payload.get('has_more')) is not bool:
                 raise HTTPFailure('头条作品列表结构待核对，停止核验', kind='invalid_response')
