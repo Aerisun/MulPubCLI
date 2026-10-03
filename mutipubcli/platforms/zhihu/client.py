@@ -66,14 +66,9 @@ class ZhihuWeb:
         if network not in ('direct', 'environment'):
             raise ValueError('知乎网络模式须为 direct 或 environment')
         self.network, self.account_id = network, ''
-        if session is None:
-            import requests as _requests
-            session = _requests.Session()
         self.http = HTTP(self.HOSTS, session=session)
         self.http.session.trust_env = network == 'environment'
-        if 'User-Agent' not in self.http.session.headers:
-            self.http.session.headers['User-Agent'] = user_agent
-        self.http.session.headers.update({'Accept': 'application/json, text/plain, */*',
+        self.http.session.headers.update({'User-Agent': user_agent, 'Accept': 'application/json, text/plain, */*',
             'Accept-Language': 'zh-CN,zh;q=0.9', 'Referer': self.COLUMN + '/', 'Origin': self.COLUMN, 'x-requested-with': 'fetch'})
         xsrf = [cookie.value for cookie in iter_cookies(self.http.session)
                 if cookie.name == '_xsrf' and cookie.value and not cookie.is_expired()]
