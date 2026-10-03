@@ -225,8 +225,13 @@ class ToutiaoWeb:
         self._guard()
         if self.qr_token and not refresh:
             if time.time() - self.qr_created_at >= 120 or not output.is_file():
-                return {'status': 'expired', 'message': '二维码需更新，请显式使用 --refresh'}
-            return {'status': 'waiting', 'qr_image': str(output)}
+                # A stale QR is never useful; rotate it immediately while preserving
+                # the current anonymous device/session cookies.
+                self.qr_token = ''
+                self.qr_created_at = 0
+                refresh = True
+            else:
+                return {'status': 'waiting', 'qr_image': str(output)}
         data = self._json('GET', SSO + '/get_qrcode/', sso=True, params=QR_PARAMS)
         token, encoded = data.get('token'), data.get('qrcode')
         if not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,256}', token):

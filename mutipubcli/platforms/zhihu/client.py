@@ -119,13 +119,21 @@ class ZhihuWeb:
         if self.login_blocked:
             raise HTTPFailure('知乎登录会话被平台拒绝，请先处理平台验证；不会自动重试')
         self._login_headers()
+        if self.qr_token and self.qr_expires_at <= time.time():
+            self.qr_token = ''
+            self.qr_link = ''
+            self.qr_expires_at = 0
+            refresh = True
         if not self.qr_token or refresh:
-            # Real browser page navigation doesn't carry x-requested-with or Origin.
-            # Sending them on GET /signin triggers Zhihu's /account/unhuman anti-bot check.
+            # A real browser registers its device id (d_c0) before visiting the sign-in
+            # page. Zhihu may answer /signin with a 3xx anti-bot challenge, but that
+            # response still sets the CSRF token we need; only d_c0 + _xsrf are required
+            # for the QR login API. Tolerate the redirect instead of aborting on it.
             nav_headers = {k: v for k, v in self.http.session.headers.items()
                            if k.lower() not in ('x-requested-with', 'origin', 'accept')}
             nav_headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-            self.http.request('GET', self.MAIN + '/signin', headers=nav_headers)
+            self.http.request('GET', self.MAIN + '/signin', headers=nav_headers,
+                              accepted_statuses={300, 301, 302, 303, 307, 308})
             self.http.request('POST', self.MAIN + '/udid', headers=nav_headers)
             xsrf = [cookie.value for cookie in iter_cookies(self.http.session)
                     if cookie.name == '_xsrf' and cookie.value and not cookie.is_expired()]
@@ -185,7 +193,13 @@ class ZhihuWeb:
                 raise HTTPFailure('知乎扫码响应状态未知，已停止', kind='invalid_response')
             if self.qr_expires_at <= time.time():
                 return {'status': 'expired', 'message': '查询期间二维码已过期，请显式使用 --refresh'}
-        except HTTPFailure:
+        except HTTPFailure as exc:
+            if exc.code == 40352:
+                # Zhihu gates scan confirmation behind its /account/unhuman anti-bot
+                # check, which an anonymous HTTP session cannot pass. The QR is still
+                # valid and this is not an account rejection, so keep the session usable.
+                return {'status': 'waiting',
+                        'message': '二维码已生成；扫码确认需在已过人机验证的浏览器会话中执行（login zhihu --poll）。'}
             self.login_blocked = True
             raise
         return {'status': 'waiting', 'message': '等待知乎 App 扫码确认'}

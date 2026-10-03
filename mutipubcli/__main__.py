@@ -1,8 +1,9 @@
 """mutipubcli — 统一多平台 HTTP 发布 CLI。
 
 命令一览：
-  mutipubcli login   <platform> [--poll] [--refresh] [--method sms] [--confirm]
-  mutipubcli check   <platform>
+  mutipubcli login   <platform> [--refresh] [--method sms]
+  mutipubcli session [<platform>]        # 查看本地登录状态（不请求网络）
+  mutipubcli reset   <platform>          # 清理登录状态后重新登录
   mutipubcli publish <platform> --article FILE --cover FILE
   mutipubcli draft   <platform> --article FILE --cover FILE
   mutipubcli verify  <platform> --id ARTICLE_ID [--article FILE]
@@ -16,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -63,6 +65,22 @@ def _new_client(platform: str):
     raise ValueError(f"{platform} 暂不支持通过此方式初始化")
 
 
+def _session_is_authenticated(path: Path) -> bool:
+    """Whether a saved credential already holds a valid login session.
+
+    The QR login API rejects authenticated sessions, so a logged-in credential cannot
+    mint a new QR; it must fall back to a fresh anonymous device session instead.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if data.get("account_id"):
+        return True
+    return any(c.get("name") in ("z_c0", "sessionid") and c.get("value")
+               for c in data.get("cookies", []))
+
+
 def _close(client) -> None:
     """Safely close any HTTP session held by the client."""
     if hasattr(client, "close"):
@@ -96,6 +114,27 @@ def _out_result(result: PublishResult) -> None:
 # login
 # ─────────────────────────────────────────────
 
+def _probe_account(platform: str, store: StorageLayout, cred_path: Path) -> dict | None:
+    """One-shot network probe of an authenticated credential.
+
+    Returns an emit-able status dict when the session is confirmed usable, or None when
+    the session is stale/expired so the caller can mint a fresh QR. Hard local errors
+    propagate so the caller reports them and stops.
+    """
+    client = None
+    try:
+        client = _load_client(platform, store)
+        info = client.account()
+        client.save(cred_path)
+    except HTTPFailure:
+        return None
+    finally:
+        _close(client)
+    return {"status": "authenticated", "platform": platform, **info,
+            "message": "登录态有效可直接使用；如需重新登录请执行 login --refresh",
+            "credential_path": str(cred_path)}
+
+
 def _cmd_login(args, store: StorageLayout) -> int:
     platform = args.platform
     # Clean up stale QR codes on every login command
@@ -120,8 +159,20 @@ def _cmd_login(args, store: StorageLayout) -> int:
                 result = client.poll_login()
                 client.save(cred_path)
             else:
-                # Start or refresh QR
-                if cred_path.exists():
+                # login reuses valid state and auto-refreshes stale state:
+                #  - an authenticated credential is probed once and returned as usable;
+                #  - if that probe fails (expired/stale), it is replaced by a fresh QR;
+                #  - a pending anonymous session is resumed (device cookies + rotated QR);
+                #  - an authenticated session can never mint a QR, so it must fall back to
+                #    a fresh anonymous device session when a new QR is needed.
+                authenticated_cred = cred_path.is_file() and _session_is_authenticated(cred_path)
+                if not args.refresh and authenticated_cred:
+                    probe = _probe_account(platform, store, cred_path)
+                    if probe is not None:
+                        _out(probe)
+                        return 0 if probe.get("status") == "authenticated" else 1
+                    # Stale/expired authenticated session: fall through and mint a fresh QR.
+                if cred_path.is_file() and not authenticated_cred:
                     client = _load_client(platform, store)
                 else:
                     client = _new_client(platform)
@@ -193,47 +244,67 @@ def _xhs_login(args, store: StorageLayout) -> int:
 
 
 # ─────────────────────────────────────────────
-# check
+# login session status / recovery
 # ─────────────────────────────────────────────
 
-def _cmd_check(args, store: StorageLayout) -> int:
-    platform = args.platform
-    cred_path = store.credentials(platform)
-
-    if not cred_path.exists():
-        _out({
-            "status": "unauthenticated",
-            "platform": platform,
-            "message": f"未找到 {platform} 凭证，请先执行: mutipubcli login {platform}",
-            "credentials_path": str(cred_path),
-        })
-        return 1
-
-    client = None
+def _credential_health(path: Path, qr_path: Path) -> dict:
+    if not path.exists():
+        return {"status": "needs_login", "credential_path": str(path)}
     try:
-        client = _load_client(platform, store)
-        info = client.account()
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return {"status": "failed", "message": f"凭证文件无法读取：{type(exc).__name__}"}
+    cookies = data.get("cookies") if isinstance(data.get("cookies"), list) else []
+    names = {item.get("name") for item in cookies if isinstance(item, dict)}
+    qr_token = data.get("qr_token") or data.get("qr_id")
+    qr_expires = data.get("qr_expires_at")
+    qr_created = data.get("qr_created_at")
+    qr_expired = (
+        qr_token
+        and (
+            (isinstance(qr_expires, (int, float)) and qr_expires <= time.time())
+            or (isinstance(qr_created, (int, float)) and time.time() - qr_created >= 120)
+        )
+    )
+    if data.get("login_blocked") is True or data.get("blocked") is True:
+        state = "blocked"
+    elif qr_expired:
+        state = "expired"
+    elif qr_token or data.get("initializing"):
+        state = "pending_scan"
+    elif data.get("account_id") or {"z_c0", "sessionid", "sessionid_ss", "sid_tt"} & names:
+        state = "authenticated"
+    else:
+        state = "needs_login"
+    result = {"status": state, "credential_path": str(path)}
+    for key in ("account_id", "user_id", "qr_expires_at", "qr_created_at", "updated_at", "expires_at", "last_error"):
+        if key in data:
+            result[key] = data[key]
+    if qr_path.is_file():
+        result["qr_image"] = str(qr_path)
+        result["qr_age_seconds"] = max(0, int(time.time() - qr_path.stat().st_mtime))
+    return result
 
-        # Enrich with local credential metadata
-        try:
-            meta = json.loads(cred_path.read_text())
-            if "expires_at" in meta:
-                info["credentials_expire_at"] = meta["expires_at"]
-            if "updated_at" in meta:
-                info["credentials_updated_at"] = meta["updated_at"]
-        except Exception:
-            pass
 
-        _out({"status": "authenticated", "platform": platform, **info})
-        return 0
-    except HTTPFailure as exc:
-        _out({**exc.as_dict(), "platform": platform})
-        return 1
-    except (FileNotFoundError, PermissionError, ValueError) as exc:
-        _out({"status": "error", "platform": platform, "message": str(exc)})
-        return 1
-    finally:
-        _close(client)
+def _cmd_session(args, store: StorageLayout) -> int:
+    platforms = (args.platform,) if args.platform else PLATFORMS
+    result = {platform: _credential_health(store.credentials(platform), store.qr_image(platform))
+              for platform in platforms}
+    _out({"storage_root": str(store.root), "sessions": result})
+    return 0
+
+
+def _cmd_reset(args, store: StorageLayout) -> int:
+    path = store.credentials(args.platform)
+    qr = store.qr_image(args.platform)
+    removed = []
+    for target in (path, qr):
+        if target.is_file():
+            target.unlink()
+            removed.append(str(target))
+    _out({"status": "reset", "platform": args.platform, "removed": removed,
+          "message": "登录状态已清理，请重新执行 login"})
+    return 0
 
 
 # ─────────────────────────────────────────────
@@ -410,10 +481,11 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  mutipubcli login toutiao              # 生成二维码
-  mutipubcli login toutiao --poll       # 轮询扫码结果
-  mutipubcli login toutiao --refresh    # 刷新二维码
-  mutipubcli check zhihu                # 检查登录态
+  mutipubcli login toutiao              # 生成二维码 / 复用有效登录态
+  mutipubcli login toutiao --refresh    # 强制刷新二维码重新登录
+  mutipubcli session                    # 查看各平台本地登录状态
+  mutipubcli session zhihu              # 只看知乎登录状态
+  mutipubcli reset zhihu                # 清理知乎登录状态
   mutipubcli publish zhihu --article article.md --cover cover.jpg
   mutipubcli verify toutiao --id 7385929102934
   mutipubcli status
@@ -432,9 +504,13 @@ def _build_parser() -> argparse.ArgumentParser:
     grp.add_argument("--confirm", action="store_true", help="输入短信验证码确认（仅 sms）")
     grp.add_argument("--refresh", action="store_true", help="强制刷新二维码")
 
-    # check
-    p_check = sub.add_parser("check", help="只读检查登录态与账号信息")
-    p_check.add_argument("platform", choices=PLATFORMS)
+    # session
+    p_session = sub.add_parser("session", help="查看本地登录状态（不请求网络）")
+    p_session.add_argument("platform", nargs="?", choices=PLATFORMS)
+
+    # reset
+    p_reset = sub.add_parser("reset", help="清理指定平台登录状态并重新登录")
+    p_reset.add_argument("platform", choices=PLATFORMS)
 
     # publish
     p_pub = sub.add_parser("publish", help="发布文章（正式公开）")
@@ -477,7 +553,8 @@ def main(argv: list[str] | None = None) -> int:
 
     dispatch = {
         "login":   lambda a: _cmd_login(a, store),
-        "check":   lambda a: _cmd_check(a, store),
+        "session": lambda a: _cmd_session(a, store),
+        "reset":   lambda a: _cmd_reset(a, store),
         "publish": lambda a: _cmd_publish(a, store, draft=False),
         "draft":   lambda a: _cmd_publish(a, store, draft=True),
         "verify":  lambda a: _cmd_verify(a, store),

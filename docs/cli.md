@@ -39,23 +39,28 @@ mutipubcli [--root DIR] <command> ...
 ## login — 扫码登录
 
 ```
-mutipubcli login <platform> [--method qr|sms] [--poll | --refresh | --confirm]
+mutipubcli login <platform> [--method qr|sms] [--refresh]
 ```
 
-**典型流程：**
+`login` 是幂等的：反复执行会**优先复用有效状态**，而不是无谓生成新二维码。
+
+- 已有**有效登录态**：内部做一次只读校验，确认有效后直接返回 `authenticated`，不再生成二维码。
+- 登录态**已过期/失效**：自动用全新匿名设备会话生成二维码替换旧会话，并返回新二维码。
+- 已有**未过期的二维码**：直接复用，不重新生成。
+- 二维码**过期**：自动刷新并返回新二维码。
 
 ```bash
-# 1. 生成二维码（输出 JSON 含 qr_image 路径）
+# 生成二维码（输出 JSON 含 qr_image 路径）
 mutipubcli login toutiao
 
-# 2. 用手机 App 扫描二维码后，轮询一次结果
+# 用手机 App 扫码后，做一次"确认"轮询，完成登录
 mutipubcli login toutiao --poll
 
-# 3. 二维码超时后刷新
+# 强制重新登录（生成全新二维码）
 mutipubcli login toutiao --refresh
 
 # 小红书短信登录
-mutipubcli login xiaohongshu --method sms          # 输入手机号，发送验证码
+mutipubcli login xiaohongshu --method sms            # 输入手机号，发送验证码
 mutipubcli login xiaohongshu --method sms --confirm  # 输入验证码完成登录
 ```
 
@@ -65,42 +70,53 @@ mutipubcli login xiaohongshu --method sms --confirm  # 输入验证码完成登�
 |------|------|
 | `--method qr` | 二维码登录（默认） |
 | `--method sms` | 短信登录（仅小红书） |
-| `--poll` | 轮询一次扫码结果，不重新生成二维码 |
-| `--refresh` | 强制刷新二维码（旧码自动失效） |
-| `--confirm` | 读取 stdin 输入短信验证码并提交 |
+| `--poll` | 扫码后单次确认扫码结果并完成登录（只查一次，不会反复轮询） |
+| `--refresh` | 强制刷新二维码，彻底重新登录 |
 
 **输出状态说明：**
 
 | status | 含义 |
 |--------|------|
-| `waiting` | 二维码已生成，等待扫码 |
+| `authenticated` | 已有有效登录态，可直接发布 |
+| `waiting` | 二维码已生成/复用，等待扫码 |
 | `scanned` | 已扫码，等待 App 确认 |
-| `authenticated` | 登录成功，凭证已保存 |
-| `missing_phone` | 扫码成功但账号未绑定手机号，需在 App 完成绑定 |
-| `expired` | 二维码已过期，执行 `--refresh` 重新生成 |
+| `expired` | 二维码/登录态已过期 |
 | `error` | 发生错误，message 字段有详情 |
 
 凭证保存在 `.storage/auth/<platform>.json`（权限 600）。
 
 ---
 
-## check — 检查登录态
+## session — 查看登录状态
 
 ```
-mutipubcli check <platform>
+mutipubcli session [<platform>]
 ```
 
-只读查询当前登录态和账号信息，不修改任何文件。
+只读查看各平台**本地登录状态**，不发起网络请求，可随时执行，不轮询。
 
 ```bash
-mutipubcli check zhihu
+mutipubcli session          # 查看全部平台
+mutipubcli session zhihu    # 只看知乎
 ```
 
-输出包含：
-- `status`: `authenticated` 或 `unauthenticated`
-- `id` / `user_id`: 平台账号 ID
-- `credentials_expire_at`: 凭证预计过期时间（有记录时）
-- `credentials_updated_at`: 凭证最后更新时间
+每个平台输出 `status`（`needs_login` / `pending_scan` / `expired` / `blocked` / `authenticated`）、凭证路径、二维码年龄等。
+
+> `login` 会做一次线上校验确认有效；`session` 只看本地状态，两者配合即可，无需反复轮询。
+
+---
+
+## reset — 清理登录状态
+
+```
+mutipubcli reset <platform>
+```
+
+删除指定平台的登录凭证和二维码，下一次 `login` 完全从头开始。用于清理卡死或需要换账号登录的场景。
+
+```bash
+mutipubcli reset zhihu
+```
 
 ---
 

@@ -7,9 +7,16 @@ import os
 import re
 import tempfile
 import subprocess
+import time
 
 from mutipubcli.http import HTTPFailure, private_json
 from .session import load_source, dump_profile, restore_profile, restore_pc_profile
+
+# A crash mid-init leaves 'initializing' set forever, so the next login refuses to
+# start and the session is permanently stuck. Treat an init left running longer than
+# this window as abandoned and let the next login recover it (bounded recovery that
+# relies only on kernel-released locks and local timestamps, never PID stealing).
+INITIALIZING_STALE_SECONDS = 15 * 60
 
 
 class LoginTransport:
@@ -113,6 +120,22 @@ class XHSLoginRuntime:
     def close(self):
         self.api.close()
 
+    def _recover_stale_initializing(self):
+        """Clear an abandoned in-progress init so the next login can start fresh.
+
+        Returns True if a stale 'initializing' marker was cleared; False if none is
+        set, or if the init is still within its live window (a real concurrent attempt).
+        """
+        if not self.state.get('initializing'):
+            return False
+        started = self.state.get('initializing_at')
+        if not isinstance(started, (int, float)) or time.time() - started < INITIALIZING_STALE_SECONDS:
+            return False
+        self.state.pop('initializing', None)
+        self.state.pop('initializing_at', None)
+        self.save()
+        return True
+
 
 class XHSLogin(XHSLoginRuntime):
     def __init__(self, path: Path, *, source: Path):
@@ -164,14 +187,16 @@ class XHSLogin(XHSLoginRuntime):
             raise HTTPFailure('本次登录会话已停止，不会重建或重试')
         if self.state.get('ready'):
             return
-        if self.state.get('initializing'):
+        if self.state.get('initializing') and not self._recover_stale_initializing():
             raise HTTPFailure('上次登录初始化未完成，保留现场等待核查，不重新创建会话')
         self.state['initializing'] = True
+        self.state['initializing_at'] = time.time()
         self.save()
         self.api._prepare_login_session()
         self.api._complete_security()
         self.state['ready'] = True
         self.state.pop('initializing', None)
+        self.state.pop('initializing_at', None)
 
     def start_login(self, output: Path):
         self.prepare()
@@ -280,9 +305,10 @@ class XHSPCLogin(XHSLoginRuntime):
             raise HTTPFailure('本次小红书主站登录会话已停止，不自动重试')
         if self.state.get('ready'):
             return
-        if self.state.get('initializing'):
+        if self.state.get('initializing') and not self._recover_stale_initializing():
             raise HTTPFailure('上次初始化未完成，保留设备现场，不自动重新初始化')
         self.state['initializing'] = True
+        self.state['initializing_at'] = time.time()
         self.save()
         cookies = self.api.generate_init_cookies()
         self.api.ensure_webprofile(cookies)
