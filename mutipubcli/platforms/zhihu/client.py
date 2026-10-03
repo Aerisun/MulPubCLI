@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 from PIL import Image
 
 from mutipubcli.core import Article, PublishResult, content_fingerprint, content_matches
-from mutipubcli.http import HTTP, HTTPFailure, iter_cookies, load_session, save_session
+from mutipubcli.http import HTTP, HTTPFailure, chrome_session, iter_cookies, load_session, save_session
 from mutipubcli.renderer import render as _render_article
 from . import signing as zhihu_signing
 
@@ -66,7 +66,10 @@ class ZhihuWeb:
         if network not in ('direct', 'environment'):
             raise ValueError('知乎网络模式须为 direct 或 environment')
         self.network, self.account_id = network, ''
-        self.http = HTTP(self.HOSTS, session=session)
+        # 默认使用 curl_cffi 伪装真实 Chrome 的 TLS 指纹。裸 requests 的 TLS 特征
+        # 一眼可辨，会被知乎 WAF 判为非浏览器并引导到 /account/unhuman；浏览器登录
+        # 成功正是因为它是真实 Chrome 指纹。可注入自定义 session 以保持兼容。
+        self.http = HTTP(self.HOSTS, session=session if session is not None else chrome_session())
         self.http.session.trust_env = network == 'environment'
         self.http.session.headers.update({'User-Agent': user_agent, 'Accept': 'application/json, text/plain, */*',
             'Accept-Language': 'zh-CN,zh;q=0.9', 'Referer': self.COLUMN + '/', 'Origin': self.COLUMN, 'x-requested-with': 'fetch'})
@@ -196,10 +199,11 @@ class ZhihuWeb:
         except HTTPFailure as exc:
             if exc.code == 40352:
                 # Zhihu gates scan confirmation behind its /account/unhuman anti-bot
-                # check, which an anonymous HTTP session cannot pass. The QR is still
-                # valid and this is not an account rejection, so keep the session usable.
+                # check. A real browser on a clean exit passes it; a datacenter/可疑
+                # 出口（TLS 或 IP 声誉）会被拦。这不是账号拒绝，二维码仍有效，保持会话
+                # 可用，提示改用干净出口重试而非必须去浏览器。
                 return {'status': 'waiting',
-                        'message': '二维码已生成；扫码确认需在已过人机验证的浏览器会话中执行（login zhihu --poll）。'}
+                        'message': '扫码被平台安全验证拦下；请用干净出口（--proxy）重试，例如住宅/SOCKS 代理。'}
             self.login_blocked = True
             raise
         return {'status': 'waiting', 'message': '等待知乎 App 扫码确认'}

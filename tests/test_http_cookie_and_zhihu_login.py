@@ -127,6 +127,17 @@ class HTTPAndZhihuLoginTests(unittest.TestCase):
         finally:
             client.close()
 
+    def test_zhihu_defaults_to_curl_cffi_chrome_session(self):
+        # 知乎登录默认应使用 curl_cffi 伪装真实 Chrome 的 TLS 指纹，而不是裸 requests，
+        # 否则 TLS 特征会被知乎 WAF 判为非浏览器并引导到 /account/unhuman。
+        client = ZhihuWeb()
+        try:
+            self.assertIsInstance(client.http.session, curl_requests.Session)
+            self.assertEqual(getattr(client.http.session, 'impersonate', ''), 'chrome146')
+            self.assertNotIsInstance(client.http.session, requests.Session)
+        finally:
+            client.close()
+
     def test_zhihu_account_accepts_curl_cffi_cookie_jar(self):
         client = ZhihuWeb()
         client.http.session.cookies.set('z_c0', 'test-session', domain='.zhihu.com', path='/')

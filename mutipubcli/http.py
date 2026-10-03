@@ -18,6 +18,18 @@ except ImportError:  # Optional XHS transport is installed by setup_xhs.py.
     CurlRequestException, CurlTimeout = requests.RequestException, requests.Timeout
 
 
+def chrome_session(impersonate: str = 'chrome146'):
+    """A curl_cffi session impersonating a real Chrome TLS fingerprint.
+
+    与小红书已验证的传输模式一致（TLS 伪装 + HTTP/2 over TLS），用于让知乎等平台在
+    登录/投稿时呈现真实浏览器指纹，避免被平台按 TLS 特征判为非浏览器。保留会话 cookie
+    的自动存取（知乎登录依赖会话内 d_c0/_xsrf/z_c0），故不使用 XHS 的 discard_cookies。
+    """
+    from curl_cffi import requests as curl_requests
+    return curl_requests.Session(impersonate=impersonate, default_headers=False,
+                                 http_version='v2tls')
+
+
 def _safe_target(url: str, *, base_url: str = '') -> str | None:
     """Return a host/path diagnostic without query strings or long identifiers."""
     try:
