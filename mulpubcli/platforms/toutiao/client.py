@@ -69,7 +69,7 @@ def article_form(article: Article, image: dict, image_map: dict[str, str], *,
             'ic_uri_list': image['uri'], 'article_ad_type': 2, 'is_fans_article': 0,
             'claim_exclusive': 0, 'govern_forward': 0, 'praise': 0, 'disable_praise': 1,
             'tree_plan_article': 0, 'educluecard': '', 'activity_tag': 0, 'trends_writing_tag': '',
-            'search_creation_info': json.dumps({'searchTopOne': 0, 'abstract': '', 'clue_id': ''}),
+            'search_creation_info': json.dumps({'searchTopOne': 0, 'abstract': article.summary or '', 'clue_id': ''}),
             'mp_editor_stat': '{}'}
 
 
