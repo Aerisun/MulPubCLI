@@ -98,14 +98,23 @@ def restore_profile(data: dict):
 
 
 def restore_pc_profile(data: dict):
-    from xhs_utils.xhs_pc.state import PcDeviceProfile, PcSessionState, B1RuntimeState, MnsStageMaterial
+    from xhs_utils.xhs_pc.state import (PcDeviceProfile, PcSessionState, B1RuntimeState,
+                                        MnsStageMaterial, _reference_mns_stages)
     # Also accept the project-local research snapshot made before CLI integration.
     values = {f.name: data[f.name] for f in fields(PcDeviceProfile) if f.init and f.name in data}
     values['cookies'] = data.get('_cookie_map', data['cookies'])
     values['session'] = PcSessionState(**_filter_dc(PcSessionState, values['session']))
     values['b1_state'] = B1RuntimeState(**_filter_dc(B1RuntimeState, values['b1_state']))
-    values['mns_stages'] = {key: MnsStageMaterial(**_filter_dc(MnsStageMaterial, {**value, 'env_fp_tail': tuple(value['env_fp_tail'])}))
-                            for key, value in values['mns_stages'].items()}
+    # PC 签名器把 mns_stages 键为 security/coldContent/steadyContent；由 creator
+    # 侧写入的旧凭据用的是 bootstrap/ready 命名（restore_profile 已做迁移，PC 侧
+    # 缺失）。这里同样从 PC reference 重建，存在的键覆盖、缺失的键用 reference
+    # 补齐，避免登录签名因缺 steadyContent 档而 KeyError（扫码登录 500）。
+    stored = values.get('mns_stages', {}) or {}
+    values['mns_stages'] = {
+        key: (MnsStageMaterial(**_filter_dc(MnsStageMaterial, {**stored[key], 'env_fp_tail': tuple(stored[key]['env_fp_tail'])}))
+              if key in stored else mat)
+        for key, mat in _reference_mns_stages().items()
+    }
     profile = PcDeviceProfile(**_filter_dc(PcDeviceProfile, values))
     runtime = data.get('runtime', {})
     profile._named_b1_states = {key: B1RuntimeState(**_filter_dc(B1RuntimeState, value)) for key, value in
