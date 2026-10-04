@@ -87,7 +87,7 @@ mulpubcli login xiaohongshu --method sms --confirm  # 输入验证码完成登�
 | `--poll` | 兼容旧流程：对小红书或头条的已有二维码只检查一次 |
 | `--confirm` | 输入短信验证码确认（仅 `--method sms`） |
 | `--refresh` | 忽略现有登录态，重新登录 |
-| `--cookie-file FILE` | 网易号 Cookie 导入兜底方式 |
+| `--cookie-file FILE` | 保留参数；当前实现尚未读取该文件，不能用于导入网易号登录态 |
 
 **输出状态说明：**
 
@@ -300,10 +300,16 @@ mulpubcli storage
 
 ```
 .storage/
-├── auth/        # 登录凭证（权限 600，永久）
+├── auth/        # 登录凭据与浏览器配置（目录权限 700）
 │   ├── xiaohongshu.json
 │   ├── zhihu.json
-│   └── toutiao.json
+│   ├── toutiao.json
+│   ├── netease.json
+│   ├── sohu.json
+│   ├── zhihu-profile/   # CLI 管理的浏览器配置
+│   ├── sohu-profile/    # CLI 管理的浏览器配置
+│   ├── auto/            # 手工保存的浏览器用户数据
+│   └── ck.txt           # 手工导出的 Cookie 文件
 ├── qr/          # 临时二维码 PNG（10 分钟自动清理）
 │   └── toutiao-login.png
 ├── results/     # 发布账本（权限 600，永久）
@@ -311,4 +317,4 @@ mulpubcli storage
 └── tmp/         # 临时中间文件
 ```
 
-`.storage/` 已加入 `.gitignore`，不会被提交到版本库。
+`.storage/` 已加入 `.gitignore`，不会被提交到版本库。登录流程使用自己的平台浏览器配置目录；手工保存的 Chromium 用户数据和 Netscape Cookie 文件可分别放在 `.storage/auth/auto/` 与 `.storage/auth/ck.txt`，CLI 不会自动读取它们。若有外部脚本使用这些文件，需要把路径改为新位置。Cookie 文件应设置为仅当前用户可读写（`chmod 600 .storage/auth/ck.txt`）。项目根目录的 `auto/` 和 `ck.txt` 也有单独的忽略规则，以免误提交。
