@@ -1,16 +1,18 @@
 """Cookie-based Zhihu article workflow; no replay of expired signing headers."""
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import json
 import re
 import time
-import os
 import uuid
-from html import escape
+from email.utils import formatdate
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import requests
 from PIL import Image
 
 from mulpubcli.core import Article, PublishResult, content_fingerprint, content_matches, strip_markdown_images
@@ -18,6 +20,58 @@ from mulpubcli.http import HTTP, HTTPFailure, chrome_session, iter_cookies, load
 from mulpubcli.renderer import render as _render_article, _ArticleHTML
 from . import cookies as zhihu_cookies
 from . import signing as zhihu_signing
+
+
+class ZhihuAPI:
+    """Aliyun OSS 直传（STS 临时凭证）：把已预注册的图片字节上传到知乎 OSS 桶。
+
+    知乎 /images 预注册接口返回 upload_file + upload_token（STS 临时凭证），
+    当 upload_file.state != 1 时需按 OSS REST 协议把图片字节 PUT 到
+    zhihu-pics-upload.zhimg.com，再回告 uploading_status。config 里的
+    is_cname 只影响域名解析，实测 CanonicalizedResource 始终带 bucket 前缀。
+    """
+
+    @staticmethod
+    def upload_oss(config, credentials, data, mime):
+        endpoint = str(config['endpoint']).rstrip('/')
+        bucket = config['bucket_name']
+        object_name = str(config['object_name']).lstrip('/')
+        access_id = credentials['access_key_id']
+        secret = credentials['secret_access_key']
+        token = credentials['security_token']
+        date = formatdate(usegmt=True)
+        # 实测知乎 OSS 的 CanonicalizedResource 始终带 bucket 前缀（/bucket/object），
+        # 与配置里的 is_cname 无关；去前缀会得到 403 SignatureDoesNotMatch。
+        canonical_resource = f"/{bucket}/{object_name}"
+        string_to_sign = (
+            "PUT\n"
+            "\n"
+            f"{mime}\n"
+            f"{date}\n"
+            f"x-oss-security-token:{token}\n"
+            f"{canonical_resource}"
+        )
+        signature = base64.b64encode(
+            hmac.new(secret.encode('utf-8'), string_to_sign.encode('utf-8'), hashlib.sha1).digest()
+        ).decode('ascii')
+        url = f"{endpoint}/{object_name}"
+        response = requests.put(
+            url,
+            data=data,
+            headers={
+                'Authorization': f'OSS {access_id}:{signature}',
+                'x-oss-security-token': token,
+                'Content-Type': mime,
+                'Content-Length': str(len(data)),
+                'Date': date,
+            },
+            timeout=30,
+        )
+        if response.status_code != 200:
+            raise HTTPFailure(
+                f'知乎 OSS 图片上传失败：HTTP {response.status_code} {response.text[:200]}',
+                kind='invalid_response',
+            )
 
 
 class ZhihuWeb:
