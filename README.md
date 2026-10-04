@@ -1,6 +1,6 @@
 # MulPubCLI
 
-MulPubCLI 是多平台文章发布命令行工具，支持小红书、知乎、今日头条、网易号和搜狐号。各平台的登录与发布能力略有差异，具体命令以 [CLI 手册](docs/cli.md)为准。
+MulPubCLI 是多平台文章发布命令行工具，几乎全部使用 HTTP 内核完成（只是在必要处短暂调用浏览器），支持小红书、知乎、今日头条、网易号和搜狐号。
 
 ## 快速开始
 
@@ -9,25 +9,42 @@ pip install -e .
 mulpubcli login zhihu
 mulpubcli publish zhihu --article article.md
 mulpubcli verify --platform zhihu
+mulpubcli list 
 ```
-
-稿件第一行是 `# 标题`，封面用 `<!-- cover: ./cover.jpg -->` 指定。图片格式、摘要处理及平台差异见[图文发布说明](docs/publishing.md)。也可以用 `python -m mulpubcli` 运行命令。
 
 ## 文档
 
 - [CLI 手册](docs/cli.md)：安装、登录、发布、草稿、列表和核验命令。
 - [图文发布说明](docs/publishing.md)：稿件格式、图片上传及各平台处理方式。
 
-## 本地数据
-
-运行时凭据、浏览器配置、二维码和发布记录放在项目根目录的 `.storage/`，该目录已被 Git 忽略。登录凭据和浏览器配置在 `.storage/auth/`；手工导出的 Cookie 文件也应放在这里，并限制文件权限。项目根目录的 `auto/` 和 `ck.txt` 另有忽略规则，防止误提交；它们现在分别存放于 `.storage/auth/auto/` 和 `.storage/auth/ck.txt`。这两份手工数据不会被 CLI 自动读取，使用它们的外部命令需要指向新路径。详见 [CLI 手册中的内部存储结构](docs/cli.md#内部存储结构)。
-
 ## 项目结构
 
 ```text
-mulpubcli/      命令行入口、存储、渲染和各平台适配代码
-docs/           CLI 手册与图文发布说明
-tests/          自动化测试
-.storage/       本地运行时数据（不入库）
-pyproject.toml  安装配置与依赖
+.
+├── mulpubcli/                 # Python 包
+│   ├── __main__.py            # CLI 命令入口
+│   ├── core.py                # 文章模型与内容指纹
+│   ├── http.py                # HTTP 会话与请求封装
+│   ├── browser.py             # 按需启动的浏览器登录组件
+│   ├── ledger.py              # 发布记录与重复提交控制
+│   ├── renderer.py            # Markdown 与图片渲染
+│   ├── storage.py             # 本地数据路径管理
+│   └── platforms/             # 各平台登录、发布与核验实现
+│       ├── xiaohongshu/
+│       ├── zhihu/
+│       ├── toutiao/
+│       ├── netease/
+│       └── sohu/
+├── docs/
+│   ├── cli.md                 # 命令与参数说明
+│   └── publishing.md          # 稿件格式与图文发布说明
+├── tests/                     # 自动化测试
+├── .storage/                  # 本地运行数据，已被 Git 忽略
+│   ├── auth/                  # 登录凭据与浏览器配置
+│   ├── qr/                    # 登录二维码
+│   ├── results/               # 发布记录
+│   └── tmp/                   # 运行时临时文件
+├── pyproject.toml             # 安装配置与依赖
+└── README.md
 ```
+
