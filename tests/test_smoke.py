@@ -4,7 +4,43 @@ import pathlib, tempfile, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from mulpubcli.core import Article
-from mulpubcli.renderer import render
+from mulpubcli.renderer import render, body_content_blocks
+from mulpubcli.platforms.netease import client as _netease_client
+
+# ── NetEase contentState 映射（真实发布记录 contentState=3=已发布；受限由 unrecomReason 表达）──
+_NECASES = [
+    ({'contentState': 3}, 'published'),
+    ({'contentState': 3, 'unrecomReason': '该内容分发受限'}, 'published(分发受限)'),
+    ({'contentState': 3, 'unrecomReason': '0'}, 'published'),
+    ({'contentState': 0}, 'draft'),
+    ({'contentState': 1}, 'pending'),
+    ({'contentState': 2}, 'unknown'),
+]
+for _item, _exp in _NECASES:
+    _got = _netease_client._content_state(_item)
+    assert _got == _exp, f"contentState mapping {_item!r}: got {_got!r}, expected {_exp!r}"
+print(f"✓ netease contentState mapping: {len(_NECASES)} cases OK")
+
+# ── 网易正文内容块顺序：图片必须嵌在文中对应位置，而非全部沉底 ──
+_tmpdir = tempfile.mkdtemp()
+_tb = pathlib.Path(_tmpdir)
+_cover = _tb / "cover.jpg"; _cover.write_bytes(b"\xff\xd8\xff")
+_im1 = _tb / "im1.jpg"; _im1.write_bytes(b"\xff\xd8\xff")
+_im2 = _tb / "im2.jpg"; _im2.write_bytes(b"\xff\xd8\xff")
+
+def _blocks_of(md_body: str):
+    p = _tb / "blocks.md"
+    p.write_text(f"# 标题\n\n<!-- cover: cover.jpg -->\n\n{md_body}", encoding="utf-8")
+    return body_content_blocks(Article.load(p))
+
+_blks = _blocks_of("首段\n\n![首图](im1.jpg)\n\n中段\n\n![尾图](im2.jpg)\n\n末段")
+_seq = [k for k, _v in _blks]
+_img_pos = [i for i, k in enumerate(_seq) if k == "image"]
+# 两张图都应插在文字之间（不挨在一起沉底），且首图不在全文最前
+assert _seq[0] == "text", "正文应以文字开头"
+assert len(_img_pos) == 2, f"应有 2 张图，实际位置 {_seq}"
+assert _img_pos[1] - _img_pos[0] > 1, "两张图被文字分隔，不应连续沉底"
+print(f"✓ netease body content blocks interleaved: seq={_seq}")
 
 with tempfile.TemporaryDirectory() as tmp:
     tmp = pathlib.Path(tmp)

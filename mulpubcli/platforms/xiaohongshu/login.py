@@ -10,6 +10,7 @@ import subprocess
 import time
 
 from mulpubcli.http import HTTPFailure, private_json
+from mulpubcli.login_flow import response_cookie_expirations
 from .session import load_source, dump_profile, restore_profile, restore_pc_profile
 
 # A crash mid-init leaves 'initializing' set forever, so the next login refuses to
@@ -25,6 +26,7 @@ class LoginTransport:
     def __init__(self, wire):
         self.wire, self.blocked = wire, False
         self.last_status, self.last_path = None, ''
+        self.cookie_expirations: list[dict] = []
 
     def _status_allowed(self, method, url, response):
         return 200 <= response.status_code < 300
@@ -43,6 +45,15 @@ class LoginTransport:
             self.blocked = True
             raise HTTPFailure('小红书登录请求结果不确定，已停止且不自动重试') from None
         self.last_status = response.status_code
+        known = {item['name']: item for item in self.cookie_expirations}
+        # These endpoints replace the anonymous web_session with the account
+        # session, sometimes only in JSON. Its old expiry no longer applies.
+        if parsed.path in ('/api/sns/web/v1/login/qrcode/status',
+                           '/api/sns/web/v2/login/code') and 'web_session' in known:
+            known['web_session'] = {'name': 'web_session', 'expires': None}
+        for item in response_cookie_expirations(response):
+            known[item['name']] = item
+        self.cookie_expirations = list(known.values())
         if not self._status_allowed(method, url, response):
             self.blocked = True
             raise HTTPFailure(f'小红书登录 HTTP {response.status_code}，已停止且不自动重试')
@@ -171,6 +182,7 @@ class XHSLogin(XHSLoginRuntime):
         client.api.http.blocked = data.get('blocked', False)
         client.api.http.last_path = data.get('last_response', {}).get('path', '')
         client.api.http.last_status = data.get('last_response', {}).get('http_status')
+        client.api.http.cookie_expirations = data.get('cookie_expirations', [])
         return client
 
     def save(self, path=None):
@@ -178,6 +190,7 @@ class XHSLogin(XHSLoginRuntime):
             'profile': dump_profile(self.api.profile), 'host_cookie_state': self.api.host_cookie_state(),
             'login': self.state, 'blocked': self.api.http.blocked,
             'last_response': {'path': self.api.http.last_path, 'http_status': self.api.http.last_status},
+            'cookie_expirations': self.api.http.cookie_expirations,
             'security': {name: getattr(self.api, name) for name in (
                 '_security_started', '_security_bootstrapped', '_security_completed', '_pending_dsl', '_pending_ds_program')},
         })
@@ -212,7 +225,10 @@ class XHSLogin(XHSLoginRuntime):
         success, user, _ = self.api.get_user_info()
         if not success or not user:
             raise HTTPFailure('小红书尚未确认有效的创作者登录态')
-        self.state.update(authenticated=True)
+        account_id = user.get('userId') or user.get('user_id') or user.get('id')
+        username = next((user[key] for key in ('nickname', 'userName', 'user_name', 'name')
+                         if isinstance(user.get(key), str) and user[key].strip()), '')
+        self.state.update(authenticated=True, account_id=str(account_id or ''), username=username)
         self.state.pop('phone', None)
         self.state.pop('qr_id', None)
         return {'status': 'authenticated', 'message': '小红书 HTTP 登录成功'}
@@ -254,12 +270,17 @@ class XHSLogin(XHSLoginRuntime):
     def export(self, path: Path):
         if not self.state.get('authenticated'):
             raise ValueError('尚未验证小红书账号，不导出发布凭证')
-        import datetime
-        now = datetime.datetime.now()
+        from datetime import datetime, timezone
+        from mulpubcli.login_flow import cookie_expiry_metadata
+        now = datetime.now(timezone.utc)
+        expiry = cookie_expiry_metadata(
+            getattr(self.api.http, 'cookie_expirations', []),
+            auth_names=('web_session',))
         private_json(path, {'cookie': self.api.profile.cookies, 'profile': dump_profile(self.api.profile),
                             'signing': {'host_cookie_state': self.api.host_cookie_state()},
-                            'expires_at': (now + datetime.timedelta(days=365)).strftime('%Y-%m-%d %H:%M:%S'),
-                            'updated_at': now.strftime('%Y-%m-%d %H:%M:%S')})
+                            'account_id': self.state.get('account_id', ''),
+                            'username': self.state.get('username', ''),
+                            'updated_at': now.isoformat(), **expiry})
 
 
 class XHSPCLogin(XHSLoginRuntime):
@@ -287,6 +308,7 @@ class XHSPCLogin(XHSLoginRuntime):
         client.api.http.blocked = data.get('blocked', False)
         client.api.http.last_status = data.get('last_response', {}).get('http_status')
         client.api.http.last_path = data.get('last_response', {}).get('path', '')
+        client.api.http.cookie_expirations = data.get('cookie_expirations', [])
         client.state = data.get('login', {'ready': bool(client.api.profile and client.api._webprofile_reported),
                                         'resume_account': True})
         return client
@@ -298,6 +320,7 @@ class XHSPCLogin(XHSLoginRuntime):
             'login_b1': self.api._login_b1, 'webprofile_reported': self.api._webprofile_reported,
             'login': self.state, 'blocked': self.api.http.blocked,
             'last_response': {'http_status': self.api.http.last_status, 'path': self.api.http.last_path},
+            'cookie_expirations': self.api.http.cookie_expirations,
         })
 
     def prepare(self):
@@ -321,7 +344,9 @@ class XHSPCLogin(XHSLoginRuntime):
         if not ok or user.get('guest') is not False or not user.get('user_id'):
             self.state.pop('authenticated', None)
             raise HTTPFailure('主站未确认正式账号；游客会话不能用于投稿')
-        self.state.update(authenticated=True, account_id=str(user['user_id']))
+        username = next((user[key] for key in ('nickname', 'user_name', 'name')
+                         if isinstance(user.get(key), str) and user[key].strip()), '')
+        self.state.update(authenticated=True, account_id=str(user['user_id']), username=username)
         for key in ('resume_account', 'qr_id', 'qr_code', 'qr_url', 'qr_expired'):
             self.state.pop(key, None)
         return {'status': 'authenticated', 'message': '小红书主站 HTTP 登录已确认'}
@@ -330,8 +355,8 @@ class XHSPCLogin(XHSLoginRuntime):
         self.prepare()
         if not refresh and (self.state.get('authenticated') or self.state.get('resume_account')):
             return self.accept()
-        if self.state.get('qr_expired') and not refresh:
-            raise HTTPFailure('二维码已过期；使用 --refresh 明确申请新二维码')
+        if self.state.get('qr_expired'):
+            refresh = True
         if refresh or not self.state.get('qr_id'):
             for key in ('authenticated', 'account_id', 'resume_account'):
                 self.state.pop(key, None)
@@ -362,21 +387,26 @@ class XHSPCLogin(XHSLoginRuntime):
     def export(self, path: Path):
         if not self.state.get('authenticated'):
             raise ValueError('主站账号尚未验证，不导出凭证')
-        from .xhs_http import XHSHTTP
+        from .client import XHSHTTP
         from xhs_utils.xhs_pc.state import cookie_header
-        import datetime
-        now = datetime.datetime.now()
+        from datetime import datetime, timezone
+        from mulpubcli.login_flow import cookie_expiry_metadata
+        now = datetime.now(timezone.utc)
         cookies = self.api.profile.cookie_map
+        expiry = cookie_expiry_metadata(
+            getattr(self.api.http, 'cookie_expirations', []),
+            auth_names=('web_session',))
         config = {'cookie': cookie_header(cookies), 'signing': {'host_cookie_state': self.api.host_cookie_state()},
-                  'expires_at': (now + datetime.timedelta(days=365)).strftime('%Y-%m-%d %H:%M:%S'),
-                  'updated_at': now.strftime('%Y-%m-%d %H:%M:%S')}
+                  'account_id': self.state['account_id'], 'username': self.state.get('username', ''),
+                  'updated_at': now.isoformat(), **expiry}
         # Retain the creator signing context only when it belongs to this device.
         if path.exists():
             if path.stat().st_mode & 0o077:
                 raise ValueError('凭证文件须为 600 权限')
             old = json.loads(path.read_text())
             profile = old.get('profile')
-            if profile and profile.get('cookies', {}).get('a1') == cookies.get('a1'):
+            if (not old.get('login') and profile
+                    and profile.get('cookies', {}).get('a1') == cookies.get('a1')):
                 config['profile'] = profile
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd, name = tempfile.mkstemp(prefix='.creator-candidate-', dir=path.parent)

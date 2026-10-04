@@ -18,7 +18,6 @@ from PIL import Image
 from mulpubcli.core import Article, PublishResult, content_fingerprint, content_matches, strip_markdown_images
 from mulpubcli.http import HTTP, HTTPFailure, chrome_session, iter_cookies, load_session, save_session
 from mulpubcli.renderer import render as _render_article, _ArticleHTML
-from . import cookies as zhihu_cookies
 from . import signing as zhihu_signing
 
 
@@ -102,12 +101,16 @@ class ZhihuWeb:
         self.qr_link = ''
         self.qr_expires_at = 0
         self.login_blocked = False
+        self.username = ''
+        self.expires_at = None
 
     @classmethod
     def load(cls, path: Path):
         session, metadata = load_session(path, cls.HOSTS)
         client = cls(session=session, user_agent=metadata.get('user_agent'), network=metadata.get('network', metadata.get('transport', 'direct')))
         client.account_id = metadata.get('account_id', '')
+        client.username = metadata.get('username', '')
+        client.expires_at = metadata.get('expires_at')
         client.qr_token = metadata.get('qr_token', '')
         client.qr_link = metadata.get('qr_link', '')
         expiry = metadata.get('qr_expires_at', 0)
@@ -119,9 +122,15 @@ class ZhihuWeb:
         return client
 
     def save(self, path: Path):
+        from mulpubcli.login_flow import cookie_expiry_metadata
+        expiry = cookie_expiry_metadata(
+            [{'name': cookie.name, 'expires': cookie.expires}
+             for cookie in iter_cookies(self.http.session)], auth_names=('z_c0',))
+        self.expires_at = expiry['expires_at']
         save_session(path, self.http.session, qr_token=self.qr_token, qr_link=self.qr_link,
                      qr_expires_at=self.qr_expires_at, login_blocked=self.login_blocked,
-                     user_agent=self.http.session.headers['User-Agent'], network=self.network, account_id=self.account_id)
+                     user_agent=self.http.session.headers['User-Agent'], network=self.network,
+                     account_id=self.account_id, username=self.username, **expiry)
 
     def close(self):
         self.http.session.close()
@@ -129,44 +138,10 @@ class ZhihuWeb:
     def _login_headers(self):
         self.http.session.headers.update({'Referer': self.MAIN + '/signin', 'Origin': self.MAIN})
 
-    @classmethod
-    def import_cookies(cls, source: Path, destination: Path):
-        """从浏览器导出的 Cookie 文件导入知乎登录态并原子保存凭证。
-
-        解析浏览器导出的 Cookie 文件（原始 Cookie 头 / Chrome 扩展 JSON /
-        Playwright JSON / Netscape cookies.txt），只保留知乎域名与未过期的
-        z_c0，调用 account() 核验账号登录态，核验成功才写入正式凭证；核验失败
-        不会覆盖已有的有效凭证。导入不保留旧二维码登录状态。
-        """
-        return cls.import_cookie_text(
-            source.read_text(encoding='utf-8', errors='replace'), destination)
-
-    @classmethod
-    def import_cookie_text(cls, text: str, destination: Path):
-        """从 Cookie 文本（而非文件）导入知乎登录态并原子保存凭证。
-
-        供终端无回显粘贴（--cookie-stdin）使用；解析、校验与核验逻辑与
-        import_cookies 完全一致。该路径不把 Cookie 明文落盘。
-        """
-        records = zhihu_cookies.parse_cookie_text(text)
-        records = zhihu_cookies.zhihu_records(records)
-        zhihu_cookies.require_login_cookie(records)
-        session = zhihu_cookies.build_session(records)
-        client = cls(session=session, network='direct')
-        try:
-            info = client.account()
-            # 只写 Cookie 与账号元数据，不残留任何旧二维码登录字段。
-            client.qr_token, client.qr_link = '', ''
-            client.qr_expires_at, client.login_blocked = 0, False
-            client.save(destination)
-            return info
-        finally:
-            client.close()
-
     def account(self):
         if not any(cookie.name == 'z_c0' and cookie.value and not cookie.is_expired()
                    for cookie in iter_cookies(self.http.session)):
-            raise HTTPFailure('知乎尚无有效登录 Cookie；请导入浏览器导出的知乎 Cookie 文件', kind='authentication_required')
+            raise HTTPFailure('知乎尚无有效登录 Cookie；请执行: mulpubcli login zhihu（浏览器扫码）', kind='authentication_required')
         result = self.http.json('GET', self.MAIN + '/api/v4/me')
         HTTP.checked(result)
         if not isinstance(result.get('id'), str) or not result['id']:
@@ -174,6 +149,7 @@ class ZhihuWeb:
         if self.account_id and self.account_id != result['id']:
             raise HTTPFailure('知乎返回的账号与保存的账号不同，已停止', kind='account_mismatch')
         self.account_id = result['id']
+        self.username = result.get('name') if isinstance(result.get('name'), str) else ''
         return {key: result.get(key) for key in ('id', 'name')}
 
     def upload_image(self, path: Path):
@@ -236,8 +212,11 @@ class ZhihuWeb:
             image_map[str(img_path)] = body_img_url
             if media_checkpoint:
                 media_checkpoint(self._image_key(body_img_url))
-        # ── Render HTML (cover inline at top, then body) ────────────────────
-        html = _render_article(article, image_map, cover_first=True, include_title=False)
+        # The article cover is a separate draft field, not the first body image.
+        self.http.request('PATCH', self.COLUMN + f'/api/articles/{draft_id}/draft', json={
+            'titleImage': cover_url, 'isTitleImageFullScreen': False, 'delta_time': 0,
+        })
+        html = _render_article(article, image_map, cover_first=False, include_title=False)
         self.http.request('PATCH', self.COLUMN + f'/api/articles/{draft_id}/draft', json={
             'title': article.title, 'content': html, 'delta_time': 0,
         })
@@ -245,6 +224,7 @@ class ZhihuWeb:
         HTTP.checked(saved)
         actual, wanted = _ArticleHTML(saved.get('content')), _ArticleHTML(html)
         if (str(saved.get('id')) != draft_id or saved.get('title') != article.title
+                or self._image_key(saved.get('titleImage') or saved.get('title_image')) != self._image_key(cover_url)
                 or actual.text != wanted.text
                 or [self._image_key(src) for src in actual.images] != [self._image_key(src) for src in wanted.images]):
             raise HTTPFailure('知乎草稿回读与原稿不一致，已停止发表')
@@ -275,7 +255,17 @@ class ZhihuWeb:
             # 渲染后正文只保留可见文本与独立配图，markdown 图片语法不进入内容，
             # 指纹须基于剥离图片语法后的正文计算。
             evidence.update(content_fingerprint('zhihu', expected.title, strip_markdown_images(expected.body)))
-        data = self.http.json('GET', self.COLUMN + f'/api/articles/{article_id}')
+        try:
+            data = self.http.json('GET', self.COLUMN + f'/api/articles/{article_id}')
+        except HTTPFailure as exc:
+            if exc.status_code != 404:
+                raise
+            state = self.article_state(article_id)
+            if state == 'draft':
+                return PublishResult('draft', '知乎草稿仍在，尚未公开发表',
+                                     f'{self.COLUMN}/p/{article_id}/edit', 'zhihu', 'published')
+            return PublishResult('pending', '知乎公开文章暂不可见，尚不能判定已删除',
+                                 platform='zhihu', verification='unavailable')
         HTTP.checked(data)
         url = f'{self.COLUMN}/p/{article_id}'
         if str(data.get('id')) == article_id and data.get('state') == 'published':
@@ -285,12 +275,25 @@ class ZhihuWeb:
                 raise HTTPFailure('知乎本地图片证据格式无效', kind='local_state_invalid')
             # Older checkpoints retained the full CDN path, including a rendition suffix.
             expected_media = [self._image_key('https://pic1.zhimg.com/' + key) for key in (media or [])]
+            title_image = data.get('titleImage') or data.get('title_image')
+            body_media = [self._image_key(src) for src in actual.images]
+            cover_media = self._image_key(title_image)
+            # The draft keeps its cover in titleImage. Zhihu's published article
+            # can instead move that image to the start of content and clear the
+            # cover field. Both forms must still contain every expected image in order.
+            media_match = (not media or
+                           (cover_media == expected_media[0] and body_media == expected_media[1:]) or
+                           (not cover_media and body_media == expected_media))
             if ((evidence.get('sha256') and not content_matches('zhihu', data.get('title', ''), actual.text, evidence))
-                    or (media and [self._image_key(src) for src in actual.images] != expected_media)):
+                    or not media_match):
                 return PublishResult('pending', '知乎文章已存在，但正文、标题或配图未通过核对；不会重发', url, 'zhihu', 'mismatch')
             if not evidence.get('sha256') or not evidence.get('media'):
-                return PublishResult('pending', '平台显示已发表；缺少原稿或上传图片证据，无法完整核验', url, 'zhihu', 'missing_evidence')
+                return PublishResult('published', '知乎已发表；缺少原稿或上传图片证据，未做完整内容比对',
+                                     url, 'zhihu', 'published')
             return PublishResult('published', '知乎已发表，标题、完整正文和上传图片均通过回读核验', url, 'zhihu', 'verified')
+        if str(data.get('id')) == article_id and data.get('state') == 'draft':
+            return PublishResult('draft', '知乎草稿仍在，尚未公开发表',
+                                 f'{self.COLUMN}/p/{article_id}/edit', 'zhihu', 'published')
         verification = 'mismatch' if str(data.get('id')) == article_id and data.get('state') == 'draft' else 'unavailable'
         return PublishResult('pending', f'知乎文章 {article_id} 尚无明确的已发表状态', url, 'zhihu', verification)
 
@@ -306,7 +309,13 @@ class ZhihuWeb:
             data = self.http.json('GET', self.COLUMN + f'/api/articles/{article_id}')
         except HTTPFailure as exc:
             if exc.status_code == 404:
-                return 'not_found'
+                try:
+                    draft = self.http.json('GET', self.COLUMN + f'/api/articles/{article_id}/draft')
+                except HTTPFailure as draft_exc:
+                    if draft_exc.status_code == 404:
+                        return 'not_found'
+                    raise
+                return 'draft' if isinstance(draft, dict) and str(draft.get('id')) == article_id else 'unknown'
             raise
         if isinstance(data, dict) and str(data.get('id')) == article_id:
             if data.get('state') == 'published':
@@ -324,7 +333,8 @@ class ZhihuWeb:
         if (str(saved.get('id')) != draft_id or not media or any(not key for key in media)
                 or not content_matches('zhihu', saved.get('title', ''), parsed.text,
                                        content_fingerprint('zhihu', article.title, strip_markdown_images(article.body)))
-                or [self._image_key(src) for src in parsed.images] != media):
+                or self._image_key(saved.get('titleImage') or saved.get('title_image')) != media[0]
+                or [self._image_key(src) for src in parsed.images] != media[1:]):
             raise HTTPFailure('发表前的草稿与原稿或上传图片不一致，已停止')
         options = {
             'commentPermission': 'anyone', 'disclaimer_type': 'none', 'disclaimer_status': 'close',
@@ -358,6 +368,29 @@ class ZhihuWeb:
                 raise ValueError('mismatched article')
         except (KeyError, TypeError, ValueError, AttributeError):
             raise HTTPFailure('知乎发表回执未匹配当前文章，先核验，禁止重发', kind='invalid_response') from None
+
+    def draft(self, article: Article, *, checkpoint=None) -> PublishResult:
+        """Save a draft and return the ID already checked by create_draft."""
+        try:
+            self.account()
+        except Exception as exc:
+            return PublishResult('failed', f'知乎账号核验未通过：{type(exc).__name__}；尚未创建草稿',
+                                 platform='zhihu')
+        def remember_media(key):
+            if not key:
+                raise HTTPFailure('知乎上传图片地址无效')
+            if checkpoint:
+                checkpoint('uploaded', key)
+        try:
+            draft_id = self.create_draft(
+                article,
+                checkpoint=(lambda value: checkpoint('draft', value)) if checkpoint else None,
+                media_checkpoint=remember_media, _account_checked=True)
+        except Exception as exc:
+            return PublishResult('pending', f'知乎草稿结果待核验：{type(exc).__name__}；不会自动重发',
+                                 platform='zhihu', verification='unavailable')
+        return PublishResult('draft', '知乎草稿已保存并回读一致',
+                             f'{self.COLUMN}/p/{draft_id}/edit', 'zhihu', 'verified')
 
     def publish(self, article: Article, *, checkpoint=None):
         try:

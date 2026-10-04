@@ -2,7 +2,7 @@
 
 Article
     title       : str          — 文章标题（从 Markdown 第一行 # 提取）
-    summary     : str | None   — 文章摘要（从 <!-- summary: ... --> 指令提取，可为空）
+    summary     : str | None   — 从 <!-- summary: ... --> 提取的摘要
     body        : str          — 正文 Markdown 原文（不含标题行、封面与摘要指令）
     cover       : Path         — 封面图片本地路径（必须存在）
     body_images : tuple[Path]  — 正文中引用的本地图片路径列表（自动提取，可为空）
@@ -27,10 +27,11 @@ _MD_IMG_RE = re.compile(r'!\[[^\]]*\]\(([^)]+)\)')
 
 # Regex to detect a cover directive line: <!-- cover: path -->
 # Matches a full standalone line (trims surrounding whitespace), not inline/cross-line.
-_COVER_RE = re.compile(r'^\s*<!--\s*cover\s*:\s*(.+?)\s*-->\s*$')
+_COVER_RE = re.compile(r'^\s*<!--\s*cover\s*:\s*(.+?)\s*-->\s*$', re.IGNORECASE)
+_COVER_START_RE = re.compile(r'^\s*<!--\s*cover\s*:', re.IGNORECASE)
 # Regex to start a summary directive: <!-- summary: ... --> (may span lines to -->).
 # 摘要与本仓库 `Article.content` 的 `<!-- summary: ... -->` 特殊语法对齐。
-_SUMMARY_START_RE = re.compile(r'^\s*<!--\s*summary\s*:\s*(.*)$')
+_SUMMARY_START_RE = re.compile(r'^\s*<!--\s*summary\s*:\s*(.*)$', re.IGNORECASE)
 
 
 def _is_local(src: str) -> bool:
@@ -50,6 +51,12 @@ def _extract_body_images(body: str, base_dir: Path) -> tuple[Path, ...]:
         if str(p) not in seen:
             seen[str(p)] = p
     return tuple(seen.values())
+
+
+def remote_body_images(body: str) -> tuple[str, ...]:
+    """Image sources that cannot be uploaded as local files by gallery/browser paths."""
+    return tuple(src.strip() for src in _MD_IMG_RE.findall(body)
+                 if not _is_local(src.strip()))
 
 
 def strip_markdown_images(text: str) -> str:
@@ -84,30 +91,41 @@ class Article:
 
         title = lines[0][2:].strip()
 
-        # Scan for the cover / summary directives and remove them from the body.
+        # Extract metadata directives before any platform renders or uploads the body.
         # 封面只能来自稿件内 <!-- cover: 路径 --> 指令，无独立 --cover 参数。
         cover: Path | None = None
         summary: str | None = None
         kept_lines: list[str] = []
+        body_lines = lines[1:]
         i = 0
-        n = len(lines)
-        while i < n:
-            line = lines[i]
+        while i < len(body_lines):
+            line = body_lines[i]
             m = _COVER_RE.fullmatch(line.strip())
-            if m is not None and cover is None:
+            if m is not None:
+                if cover is not None:
+                    raise ValueError("封面指令只能出现一次")
                 raw = m.group(1).strip()
                 p = Path(raw) if Path(raw).is_absolute() else (base_dir / raw)
                 cover = p.resolve()
                 i += 1
                 continue
+            if _COVER_START_RE.match(line):
+                raise ValueError("封面指令格式无效，请使用 <!-- cover: 路径 -->")
             s = _SUMMARY_START_RE.match(line)
-            if s is not None and summary is None:
+            if s is not None:
+                if summary is not None:
+                    raise ValueError("摘要指令只能出现一次")
                 chunk = s.group(1)
                 i += 1
-                while i < n and "-->" not in chunk:
-                    chunk += "\n" + lines[i]
+                while "-->" not in chunk and i < len(body_lines):
+                    chunk += "\n" + body_lines[i]
                     i += 1
-                summary = chunk.split("-->", 1)[0].strip()
+                if "-->" not in chunk:
+                    raise ValueError("摘要指令缺少结束标记 -->")
+                value, rest = chunk.split("-->", 1)
+                if rest.strip() or not value.strip():
+                    raise ValueError("摘要指令格式无效")
+                summary = value.strip()
                 continue
             kept_lines.append(line)
             i += 1
@@ -150,9 +168,9 @@ class Article:
     def describe(self) -> dict:
         return {
             "title": self.title,
+            "summary": self.summary,
             "body_length": len(self.body),
             "cover": str(self.cover),
-            "summary": self.summary,
             "body_images_count": len(self.body_images),
             "body_images": [str(p) for p in self.body_images],
         }

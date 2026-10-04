@@ -11,12 +11,11 @@
         str(article.body_images[0]): "https://cdn.platform.com/body_img1_uri",
     }
     # 第三步：调用 render() 得到最终 HTML
-    html = render(article, image_map, cover_first=True)
+    html = render(article, image_map)
 
 render() 规则：
-  - 封面图：由 image_map[str(article.cover)] 决定 URL；
-    若 cover_first=True，封面以 <figure> 插在正文最前；
-    知乎需要 cover_first=False（知乎 API 单独处理封面字段）。
+  - 封面图：文章渠道通过各自的封面字段单独提交；默认不插入正文。
+    只有显式指定 cover_first=True 时，封面才以 <figure> 插在正文最前。
   - 正文段落：逐行解析 Markdown，段落间双换行分隔。
   - 正文内嵌图片：![alt](本地路径) → <figure><img src="平台URL"></figure>；
     未在 image_map 中的本地路径直接跳过（保证不生成破链）。
@@ -75,6 +74,74 @@ class _ArticleHTML(HTMLParser):
 
 def _is_remote(src: str) -> bool:
     return src.startswith(("http://", "https://", "data:"))
+
+
+def _local_path(src: str, base_dir: Path | None = None) -> Path | None:
+    """Resolve a Markdown image src to a resolved local Path, or None if remote/missing.
+
+    与 _render_body 的落图规则保持一致：本地路径相对稿件目录解析，
+    远程 URL 不返回本地路径。
+    """
+    src = src.strip()
+    if _is_remote(src):
+        return None
+    p = Path(src) if Path(src).is_absolute() else (base_dir or Path('.')) / src
+    return p.resolve()
+
+
+def body_content_blocks(article: Article) -> list[tuple[str, object]]:
+    """把正文按文档原始顺序拆成可交替插入的内容块。
+
+    每块是 ``('text', str)`` 或 ``('image', Path)``，顺序与 Markdown 正文一致，
+    镜像 ``_render_body`` 的段落/图块划分，但保留本地图片路径而非丢弃。
+
+    用途：网易发布用真实编辑器里「粘贴」逐块插入时，必须按原顺序贴文字、插图，
+    否则图片会被全部追加到正文末尾。
+    """
+    body = article.body
+    if not isinstance(body, str) or not body.strip():
+        return []
+    base_dir = article.source_dir
+    blocks: list[tuple[str, object]] = []
+    pending: list[str] = []
+
+    def flush_text() -> None:
+        if pending:
+            text = '\n'.join(pending).strip('\n')
+            if text:
+                blocks.append(('text', text))
+            pending.clear()
+
+    for raw_line in body.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            if pending:
+                pending.append('')
+            continue
+        sole = _MD_IMG_RE.fullmatch(stripped)
+        if sole is not None:
+            # 独立图片行 → 图块
+            flush_text()
+            p = _local_path(sole.group(2), base_dir)
+            if p is not None:
+                blocks.append(('image', p))
+            continue
+        # 文本行，可能内嵌图片 → 按出现顺序拆成文字/图块
+        last = 0
+        for m in _MD_IMG_RE.finditer(stripped):
+            before = stripped[last:m.start()].strip()
+            if before:
+                pending.append(before)
+            p = _local_path(m.group(2), base_dir)
+            if p is not None:
+                flush_text()
+                blocks.append(('image', p))
+            last = m.end()
+        tail = stripped[last:].strip()
+        if tail:
+            pending.append(tail)
+    flush_text()
+    return blocks
 
 
 def _resolve_src(src: str, image_map: dict[str, str], *, base_dir: Path | None = None) -> str | None:
@@ -171,7 +238,7 @@ def render(
     article: Article,
     image_map: dict[str, str],
     *,
-    cover_first: bool = True,
+    cover_first: bool = False,
     include_title: bool = False,
 ) -> str:
     """Render article to platform HTML.
@@ -181,7 +248,7 @@ def render(
         image_map:     Mapping of local image path strings → platform CDN URLs.
                        Keys should be str(Path.resolve()) or the literal src from markdown.
         cover_first:   If True, insert the cover image as a <figure> before the body.
-                       Set False when the platform API handles the cover separately.
+                       Defaults to False because article covers are submitted separately.
         include_title: If True, prepend <h1>title</h1>. Most platforms supply the title
                        through a dedicated API field, so this defaults to False.
 

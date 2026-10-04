@@ -9,7 +9,6 @@ import os
 import re
 import time
 from datetime import datetime
-from html import escape
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
@@ -53,14 +52,10 @@ def article_form(article: Article, image: dict, image_map: dict[str, str], *,
     image_map  : {local_path_str -> platform_url} for all images (cover + body)
     """
     cover = {key: image[key] for key in ('url', 'uri', 'width', 'height')}
-    # Cover uses Toutiao's special pgc-img wrapper; body uses standard renderer
-    cover_div = (f'<div class="pgc-img"><img src="{escape(image["url"], quote=True)}" '
-                 f'img_width="{image["width"]}" img_height="{image["height"]}"></div>')
     body_html = _render_article(article, image_map, cover_first=False, include_title=False)
-    html = cover_div + body_html
     extra = {'content_source': 100000000402, 'content_word_cnt': len(article.body),
              'is_multi_title': 0, 'sub_titles': [], 'tuwen_wtt_transfer_switch': '0'}
-    return {'source': 29, 'title': article.title, 'content': html, 'pgc_id': '',
+    return {'source': 29, 'title': article.title, 'content': body_html, 'pgc_id': '',
             'title_id': f'{int(time.time() * 1000)}_{media_id}',
             'extra': json.dumps(extra, ensure_ascii=False, separators=(',', ':')),
             'save': int(public), 'entrance': 'main' if public else '', 'timer_status': 0, 'timer_time': '',
@@ -90,8 +85,11 @@ class ToutiaoWeb:
         self.csrf_expires_at = 0
         self.qr_created_at = 0
         self.qr_confirmed = False
+        self.qr_expired = False
         self.login_blocked = False
         self.mobile_bound = False
+        self.username = ''
+        self.expires_at = None
         self.path = None
         self.http.on_response = self._response
 
@@ -105,6 +103,8 @@ class ToutiaoWeb:
                 client.close()
                 raise ValueError('头条会话元数据格式无效')
             setattr(client, key, value)
+        client.username = metadata.get('username', '')
+        client.expires_at = metadata.get('expires_at')
         for key in ('qr_created_at', 'csrf_expires_at'):
             value = metadata.get(key, 0)
             if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
@@ -112,16 +112,25 @@ class ToutiaoWeb:
                 raise ValueError('头条会话时间戳无效')
             setattr(client, key, value)
         client.qr_confirmed = metadata.get('qr_confirmed') is True
+        client.qr_expired = metadata.get('qr_expired') is True
         client.login_blocked = metadata.get('login_blocked', False) is True
         client.path = path
         return client
 
     def save(self, path: Path):
+        from mulpubcli.login_flow import cookie_expiry_metadata
+        expiry = cookie_expiry_metadata(
+            [{'name': cookie.name, 'expires': cookie.expires}
+             for cookie in iter_cookies(self.http.session)],
+            auth_names=('sessionid', 'sessionid_ss', 'sid_tt'))
+        self.expires_at = expiry['expires_at']
         save_session(path, self.http.session, user_agent=self.http.session.headers['User-Agent'],
                      network=self.network, account_id=self.account_id, user_id=self.user_id,
                      qr_token=self.qr_token, qr_created_at=self.qr_created_at,
                      csrf_token=self.csrf_token, csrf_expires_at=self.csrf_expires_at,
-                     login_blocked=self.login_blocked, qr_confirmed=self.qr_confirmed)
+                     login_blocked=self.login_blocked, qr_confirmed=self.qr_confirmed,
+                     qr_expired=self.qr_expired,
+                     username=self.username, **expiry)
         self.path = path
 
     def _persist(self):
@@ -223,15 +232,18 @@ class ToutiaoWeb:
         self.mobile_bound = (isinstance(status_user, dict) and status_user.get('mobile_bind_ok') is True
                              or media.get('has_avoid_bind_phone_permission') is True)
         self.account_id, self.user_id = owner, user_id
+        self.username = next((value for value in (
+            media.get('name'), media.get('media_name'), media.get('screen_name'),
+            user.get('name'), user.get('screen_name'), status_user.get('name'))
+            if isinstance(value, str) and value.strip()), '')
         self._persist()
-        return {'id': owner, 'user_id': user_id}
+        return {'id': owner, 'user_id': user_id, 'name': self.username}
 
     def start_login(self, output: Path, *, refresh=False):
         self._guard()
         if self.qr_token and not refresh:
-            if time.time() - self.qr_created_at >= 120 or not output.is_file():
-                # A stale QR is never useful; rotate it immediately while preserving
-                # the current anonymous device/session cookies.
+            if self.qr_expired or not output.is_file():
+                # Only the platform can establish that a QR has expired.
                 self.qr_token = ''
                 self.qr_created_at = 0
                 refresh = True
@@ -251,6 +263,7 @@ class ToutiaoWeb:
             raise HTTPFailure('头条二维码不是有效图像', kind='invalid_response') from None
         self.qr_token, self.qr_created_at = token, time.time()
         self.qr_confirmed = False
+        self.qr_expired = False
         self._persist()
         output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -295,7 +308,8 @@ class ToutiaoWeb:
         if status in ('1', 'new', '2', 'scanned'):
             return {'status': 'scanned' if status in ('2', 'scanned') else 'waiting', 'message': '等待今日头条 App 确认登录'}
         if status in ('4', '5', 'expired'):
-            return {'status': 'expired', 'message': '二维码失效，请显式刷新；不会自动换码'}
+            self.qr_expired = True
+            return {'status': 'expired', 'message': '二维码已失效，请重新执行 login 获取新码'}
         if status not in ('3', 'confirmed'):
             raise HTTPFailure('头条扫码返回未知状态，停止操作', kind='invalid_response')
         self._finish_login(data.get('redirect_url'))
@@ -366,8 +380,8 @@ class ToutiaoWeb:
                 for key, item in value.items()}
 
     def find_article(self, article_id, *, draft=False):
-        # From the current graphic editor articles chunk. Bounded to 100 recent entries.
-        for page in range(1, 6):
+        # Walk the authenticated feed until its end, with a safety cap.
+        for page in range(1, 51):
             params = {'provider_type': 'mp_provider', 'aid': '13', 'app_name': 'news_article',
                 'category': 'mp_article', 'channel': '', 'stream_api_version': '88',
                 'genre_type_switch': json.dumps({'repost': 1, 'small_video': 1, 'toutiao_graphic': 1,
@@ -411,7 +425,8 @@ class ToutiaoWeb:
         # Reuses the same graphic-editor articles feed pagination as find_article,
         # but collects every entry instead of stopping at the first id match.
         found: list[dict] = []
-        for page in range(1, 6):
+        self._last_list_complete = False
+        for page in range(1, 51):
             params = {'provider_type': 'mp_provider', 'aid': '13', 'app_name': 'news_article',
                 'category': 'mp_article', 'channel': '', 'stream_api_version': '88',
                 'genre_type_switch': json.dumps({'repost': 1, 'small_video': 1, 'toutiao_graphic': 1,
@@ -456,6 +471,7 @@ class ToutiaoWeb:
                 except (KeyError, TypeError, ValueError, AttributeError):
                     raise HTTPFailure('头条作品列表条目结构待核对，停止核验', kind='invalid_response') from None
             if not payload['has_more']:
+                self._last_list_complete = True
                 break
         return found
 
@@ -471,13 +487,13 @@ class ToutiaoWeb:
         item = self.find_article(article_id, draft=draft)
         if not item:
             return PublishResult('pending', '已检查的作品列表未找到该文章，不会重发', platform=PLATFORM, verification='unavailable')
+        item_id = identifier(item.get('item_id'))
+        url = f'https://www.toutiao.com/article/{item_id}/' if item_id else None
         status = item.get('status')
         if type(status) is not int or status != (9 if draft else 2):
             failed = status == 3 and type(status) is int
             return PublishResult('failed' if failed else 'pending', '头条尚未通过要求的发布状态核验', platform=PLATFORM,
-                                 verification='mismatch' if status in (3, 4, 9) else 'unavailable')
-        item_id = identifier(item.get('item_id'))
-        url = f'https://www.toutiao.com/article/{item_id}/' if item_id else None
+                                 url=url, verification='mismatch' if status in (3, 4, 9) else 'unavailable')
         if not proof.get('sha256') or not proof.get('media'):
             # 平台已返回发布状态，此时状态本身就是发布的确证；本地缺原稿/配图
             # 证据只意味着不做内容比对，仍应确认发布状态并回填公开链接。
@@ -492,12 +508,17 @@ class ToutiaoWeb:
         if isinstance(covers, str):
             try: covers = json.loads(covers)
             except ValueError: covers = None
-        cover_ids = [v.get('uri') for v in covers if isinstance(v, dict)] if isinstance(covers, list) else []
+        cover_ids = [v.get('uri') or v.get('origin_uri') for v in covers
+                     if isinstance(v, dict)] if isinstance(covers, list) else []
+        body_ids = [image_identity(src) for src in html.images]
+        # Published detail can add the cover as the first body image, although
+        # the editor submitted it as a separate cover field.
+        body_matches = body_ids in (proof['media'][1:], proof['media'])
         if (identifier(data.get('pgc_id')) != article_id or identifier(data.get('media_id')) != self.account_id
                 or not content_matches(PLATFORM, data.get('title', ''), html.text, proof)
-                or [image_identity(src) for src in html.images] != proof['media']
+                or not body_matches
                 or cover_ids != proof['media'][:1]):
-            return PublishResult('pending', '头条标题、完整正文、配图、封面或账号未通过核对', platform=PLATFORM, verification='mismatch')
+            return PublishResult('pending', '头条标题、完整正文、配图、封面或账号未通过核对', url, PLATFORM, 'mismatch')
         if draft:
             return PublishResult('draft', f'头条草稿 {article_id} 完整回读通过', platform=PLATFORM, verification='verified')
         if not item_id:
@@ -534,7 +555,8 @@ class ToutiaoWeb:
         article_id = ''
         try:
             if checkpoint:
-                checkpoint('uploaded', image['uri'])
+                for media_uri in media_uris:
+                    checkpoint('uploaded', media_uri)
             self.prepare_csrf()
             data = self.call('POST', '/mp/agw/article/publish', params={
                 'source': 'mp', 'type': 'article', 'aid': '1231', 'mp_publish_ab_val': '0'},

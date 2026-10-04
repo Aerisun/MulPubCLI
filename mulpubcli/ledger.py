@@ -4,12 +4,15 @@ import hashlib
 import json
 import os
 import fcntl
+import re
+import uuid
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from .core import Article, PublishResult, content_fingerprint
+from .core import Article, PublishResult, content_fingerprint, strip_markdown_images
 from .http import HTTPFailure, private_json
 
 
@@ -38,6 +41,50 @@ class ResultLedger:
     @staticmethod
     def _remote_write(record):
         return bool(record.get('remote_id')) and record.get('stage') in ('draft', 'submitted')
+
+    def tracked_records(self) -> list[tuple[Path, dict]]:
+        """Return the local submission records still shown by list/verify."""
+        with self._locked():
+            return [(path, data) for path in sorted(self.directory.glob('*.json'))
+                    if (data := self._read(path)).get('tracked') is not False]
+
+    def untrack_records(self, records: list[tuple[str, str | None]]) -> int:
+        """Hide selected entries without erasing duplicate-submission evidence."""
+        with self._locked():
+            selected = []
+            for record_id, saved_at in records:
+                if Path(record_id).name != record_id or '/' in record_id or '\\' in record_id:
+                    raise HTTPFailure('跟踪编号无效，未修改记录', kind='local_state_invalid')
+                path = self.directory / f'{record_id}.json'
+                data = self._read(path)
+                if data.get('tracked') is False or data.get('saved_at') != saved_at:
+                    raise HTTPFailure('跟踪记录已发生变化，未修改记录；请重新执行 list-delete',
+                                      kind='local_state_invalid')
+                selected.append((path, data))
+            now = datetime.now(timezone.utc).isoformat()
+            for path, data in selected:
+                data.update(tracked=False, untracked_at=now)
+                private_json(path, data)
+            return len(selected)
+
+    @staticmethod
+    def _id_from_url(platform: str, url: str | None) -> str | None:
+        if not isinstance(url, str):
+            return None
+        parsed = urlsplit(url)
+        if parsed.scheme != 'https':
+            return None
+        patterns = {
+            'zhihu': ('zhuanlan.zhihu.com', r'/p/(\d+)(?:/edit)?/?'),
+            'xiaohongshu': ('www.xiaohongshu.com', r'/explore/([0-9a-f]{24})/?'),
+            'netease': ('www.163.com', r'/dy/article/([A-Za-z0-9_-]+)\.html'),
+            'sohu': ('www.sohu.com', r'/a/(\d+)_\d+/?'),
+        }
+        host, pattern = patterns.get(platform, ('', ''))
+        if parsed.hostname != host:
+            return None
+        match = re.fullmatch(pattern, parsed.path)
+        return match.group(1) if match else None
 
     def _path(self, platform: str, article: Article) -> Path:
         content = json.dumps([article.title, article.body], ensure_ascii=False).encode("utf-8")
@@ -71,6 +118,27 @@ class ResultLedger:
                 if data.get('status') != 'failed' or self._remote_write(data):
                     return False
         return True
+
+    def existing_submission(self, platform: str, article: Article) -> dict:
+        """Find the most useful previous result, including archived forced attempts."""
+        wanted = content_fingerprint(platform, article.title, article.body)
+        direct_paths = {self._path(platform, article), self._legacy_path(platform, article)}
+        with self._locked():
+            matches = []
+            for path in self.directory.glob(f'{platform}-*.json'):
+                record = self._read(path)
+                proof = record.get('content_check')
+                if (path not in direct_paths and
+                        (not isinstance(proof, dict) or
+                         not all(proof.get(key) == value for key, value in wanted.items()))):
+                    continue
+                if record.get('status') == 'failed' and not self._remote_write(record):
+                    continue
+                matches.append(record)
+        return max(matches, key=lambda record: (
+            record.get('status') == 'published', bool(record.get('url')),
+            bool(record.get('remote_id')), str(record.get('saved_at') or '')),
+            default={})
 
     def migrate_record(self, platform: str, article: Article, *, original_cover=None):
         """Associate a legacy record only after recomputing its original full-input key."""
@@ -117,6 +185,18 @@ class ResultLedger:
             self._save(platform, article, PublishResult('pending', '已预留提交；中断或超时后先核验，不自动重发', platform=platform), new_reservation=True)
             return True
 
+    def begin_forced_attempt(self, platform: str, article: Article) -> Path:
+        """Preserve the previous submission before starting another attempt of the same article."""
+        with self._locked():
+            path = self._path(platform, article)
+            if path.exists():
+                self._read(path)  # Never replace a damaged record.
+                archive = path.with_name(f'{path.stem}-attempt-{uuid.uuid4().hex}.json')
+                os.replace(path, archive)
+            return self._save(platform, article, PublishResult(
+                'pending', '已开始强制提交；中断后先回查，不自动重发', platform=platform),
+                new_reservation=True)
+
     def save(self, platform: str, article: Article, result: PublishResult) -> Path:
         with self._locked():
             return self._save(platform, article, result)
@@ -126,8 +206,11 @@ class ResultLedger:
         previous = self._read(path) if path.exists() else {}
         now = datetime.now(timezone.utc).isoformat()
         reserved = now if new_reservation else previous.get('reserved_at', previous.get('saved_at', now))
-        payload = {"title": article.title, **previous, **asdict(result), "platform": platform, "saved_at": now, 'reserved_at': reserved}
+        payload = {"title": article.title, **previous, **asdict(result), "platform": platform,
+                   "saved_at": now, 'reserved_at': reserved, 'tracked': True}
         payload.setdefault('content_check', content_fingerprint(platform, article.title, article.body))
+        payload.setdefault('verify_check', content_fingerprint(platform, article.title,
+                                                               strip_markdown_images(article.body)))
         private_json(path, payload)
         return path
 
@@ -136,14 +219,27 @@ class ResultLedger:
             path = self._path(platform, article)
             payload = self._read(path) if path.exists() else {'status': 'pending', 'platform': platform}
             proof = payload.setdefault('content_check', content_fingerprint(platform, article.title, article.body))
+            payload.setdefault('verify_check', content_fingerprint(platform, article.title,
+                                                                   strip_markdown_images(article.body)))
             if stage == 'uploaded':
-                proof['media'] = [str(remote_id)]
-            payload.update(stage=stage, remote_id=str(remote_id))
+                image = remote_id if isinstance(remote_id, dict) else {'id': remote_id}
+                proof.setdefault('media', []).append(str(image['id']))
+                if image.get('pixel_sha256'):
+                    proof.setdefault('media_pixels', []).append(str(image['pixel_sha256']))
+                if image.get('profile'):
+                    proof.setdefault('media_profiles', []).append(list(image['profile']))
+                payload['stage'] = stage
+            elif stage in ('draft', 'submitted'):
+                payload.update(stage=stage, remote_id=str(remote_id))
+            else:
+                raise ValueError('未知的发布检查点阶段')
             private_json(path, payload)
 
     def _matching(self, platform: str, remote_id: str):
         matches = [(path, self._read(path)) for path in self.directory.glob(f'{platform}-*.json')]
-        matches = [(path, data) for path, data in matches if str(data.get('remote_id', '')) == remote_id and self._remote_write(data)]
+        matches = [(path, data) for path, data in matches
+                   if (str(data.get('remote_id', '')) == remote_id and self._remote_write(data))
+                   or (not data.get('remote_id') and self._id_from_url(platform, data.get('url')) == remote_id)]
         if len(matches) > 1:
             raise HTTPFailure('多个本地记录使用同一远端 ID；需先核对记录', kind='local_state_invalid')
         return matches[0] if matches else (None, {})
@@ -151,17 +247,29 @@ class ResultLedger:
     def verification_evidence(self, platform: str, remote_id: str, article: Article | None = None):
         with self._locked():
             _, record = self._matching(platform, remote_id)
-            proof = record.get('content_check', {}).copy()
+            original = record.get('content_check', {}).copy()
+            proof = record.get('verify_check', {}).copy()
+            if isinstance(original.get('media'), list):
+                proof['media'] = list(original['media'])
+            if isinstance(original.get('media_pixels'), list):
+                proof['media_pixels'] = list(original['media_pixels'])
+            if isinstance(original.get('media_profiles'), list):
+                proof['media_profiles'] = list(original['media_profiles'])
             if article is not None:
                 provided = content_fingerprint(platform, article.title, article.body)
-                if 'sha256' in proof and any(proof.get(key) != value for key, value in provided.items()):
+                if 'sha256' in original and any(original.get(key) != value for key, value in provided.items()):
                     raise ValueError('核验稿件与原提交指纹不同，停止核验')
-                proof.update(provided)
+                proof.update(content_fingerprint(platform, article.title,
+                                                 strip_markdown_images(article.body)))
+                if platform == 'xiaohongshu':
+                    from .platforms.xiaohongshu.client import image_profile, pixel_fingerprint
+                    proof['media_pixels'] = [pixel_fingerprint(path) for path in article.all_images()]
+                    proof['media_profiles'] = [image_profile(path) for path in article.all_images()]
             return proof
 
     def reconcile(self, platform: str, remote_id: str, result: PublishResult, *, evidence=None) -> bool:
         """Only update an already checkpointed article; this never permits resubmission."""
-        if result.platform not in (None, platform) or result.status not in ('published', 'pending', 'failed'):
+        if result.platform not in (None, platform) or result.status not in ('published', 'pending', 'failed', 'draft'):
             raise ValueError('核验结果的平台或状态无效')
         with self._locked():
             path, data = self._matching(platform, remote_id)
@@ -169,13 +277,22 @@ class ResultLedger:
                 return False
             now = datetime.now(timezone.utc).isoformat()
             data.setdefault('reserved_at', data.get('saved_at', now))
+            data.setdefault('remote_id', str(remote_id))
+            data.setdefault('stage', 'draft' if result.status == 'draft' else 'submitted')
             # A temporary unreadable result cannot erase evidence of a previous successful publication.
             if data.get('status') == 'published':
                 data['last_published'] = {key: data.get(key) for key in ('status', 'message', 'url', 'saved_at', 'verification')}
             if not (data.get('status') == 'published' and result.status == 'pending' and result.verification != 'mismatch'):
-                data.update(asdict(result), platform=platform)
-            if result.verification == 'verified' and evidence:
-                data['content_check'] = evidence
+                fields = asdict(result)
+                if fields['url'] is None and data.get('url'):
+                    fields['url'] = data['url']
+                data.update(fields, platform=platform)
+            if result.verification in ('verified', 'published') and evidence and evidence.get('sha256'):
+                data['verify_check'] = {key: evidence[key] for key in ('version', 'sha256') if key in evidence}
+                if isinstance(evidence.get('media_pixels'), list):
+                    data['verify_check']['media_pixels'] = list(evidence['media_pixels'])
+                if isinstance(evidence.get('media_profiles'), list):
+                    data['verify_check']['media_profiles'] = list(evidence['media_profiles'])
             data.update(saved_at=now, last_verification={**asdict(result), 'at': now})
             private_json(path, data)
             return True

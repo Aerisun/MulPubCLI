@@ -10,7 +10,7 @@ import secrets
 import subprocess
 import tempfile
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from PIL import Image
 
@@ -25,6 +25,23 @@ def upload_signature(period: str, file_id: str, size: int, host: str) -> str:
     canonical = f'put\n/spectrum/{file_id}\n\ncontent-length={size}&host={host}\n'
     message = f'sha1\n{period}\n{hashlib.sha1(canonical.encode()).hexdigest()}\n'
     return hmac.new(key.encode(), message.encode(), hashlib.sha1).hexdigest()
+
+
+def pixel_fingerprint(source) -> str:
+    """Hash decoded RGB pixels so CDN image IDs and PNG metadata do not matter."""
+    with Image.open(source) as image:
+        rgb = image.convert('RGB')
+        digest = hashlib.sha256(f'{rgb.width}x{rgb.height}:'.encode())
+        digest.update(rgb.tobytes())
+        return digest.hexdigest()
+
+
+def image_profile(path: Path) -> list[int]:
+    """Dimensions and exact normalized upload size, in original image order."""
+    with Image.open(path) as image:
+        output = io.BytesIO()
+        image.convert('RGB').save(output, 'PNG')
+        return [image.width, image.height, len(output.getvalue())]
 
 
 def image_payload(article: Article, images: list[dict]) -> dict:
@@ -45,6 +62,19 @@ def image_payload(article: Article, images: list[dict]) -> dict:
         'metadata': {'source': -1}, 'stickers': {'version': 2, 'floating': []},
         'extra_info_json': json.dumps({'mimeType': 'image/png', 'image_metadata': {'bg_color': '', 'origin_size': uploaded['size'] / 1024}}),
     } for uploaded in images]}, 'video_info': None}
+
+
+def note_url(note_id: str, token: str = '', source: str = '') -> str:
+    """Return the creator feed's openable share URL when its access token is present."""
+    if not re.fullmatch(r'[0-9a-f]{24}', note_id):
+        raise ValueError('小红书笔记 ID 无效')
+    url = f'https://www.xiaohongshu.com/explore/{note_id}'
+    if token:
+        params = {'xsec_token': token}
+        if source:
+            params['xsec_source'] = source
+        url += '?' + urlencode(params)
+    return url
 
 
 class XHSHTTP:
@@ -78,10 +108,11 @@ class XHSHTTP:
         values = self.auth.profile.cookie_map
         self.auth._cookie_store.merge_response(values, response)
         self.auth.update_cookies(values, source_url=response.url)
-        self.save()
+        self.save(response=response)
 
-    def save(self):
+    def save(self, *, response=None):
         import datetime, json
+        from mulpubcli.login_flow import cookie_expiry_metadata, response_cookie_expirations
         data = {}
         if self.credentials.exists():
             try:
@@ -90,8 +121,20 @@ class XHSHTTP:
                 pass
         data.update({'cookie': self.auth.cookies, 'profile': dump_profile(self.auth.profile),
             'signing': {'host_cookie_state': self.auth._cookie_store.export_state()}})
-        if 'expires_at' not in data:
-            data['expires_at'] = (datetime.datetime.now() + datetime.timedelta(days=365)).strftime('%Y-%m-%d %H:%M:%S')
+        if 'cookie_expirations' not in data:
+            # Older credentials used a guessed one-year expiry; it was not a
+            # server Cookie attribute and must not be presented as one.
+            data['expires_at'] = None
+            data['cookie_expirations'] = {}
+        else:
+            data.setdefault('expires_at', None)
+        if response is not None:
+            changes = response_cookie_expirations(response)
+            if changes:
+                expirations = dict(data['cookie_expirations'])
+                expirations.update(cookie_expiry_metadata(changes, auth_names=())['cookie_expirations'])
+                data['cookie_expirations'] = expirations
+                data['expires_at'] = expirations.get('web_session')
         data['updated_at'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         private_json(self.credentials, data)
 
@@ -138,11 +181,53 @@ class XHSHTTP:
             raise ValueError('小红书笔记 ID 无效')
         return self.call('GET', f'/web_api/sns/capa/postgw/note/detail?note_id={note_id}&source=web&edit_mode=1', edith=True)
 
+    @staticmethod
+    def _remote_image_hash(url: str) -> str:
+        try:
+            parsed = urlsplit(url)
+            host = parsed.hostname or ''
+            if (parsed.scheme != 'https' or not host.endswith('.xhscdn.com') or
+                    parsed.username or parsed.password or parsed.port not in (None, 443)):
+                raise ValueError('bad image URL')
+        except (TypeError, ValueError):
+            raise HTTPFailure('小红书原图地址无效，图片核验未完成', kind='invalid_response') from None
+        response = HTTP({host}).request('GET', url, stream=True)
+        try:
+            chunks, size = [], 0
+            for chunk in response.iter_content(1024 * 1024):
+                size += len(chunk)
+                if size > 25 * 1024 * 1024:
+                    raise HTTPFailure('小红书原图超过核验大小上限', kind='invalid_response')
+                chunks.append(chunk)
+            try:
+                return pixel_fingerprint(io.BytesIO(b''.join(chunks)))
+            except (OSError, ValueError):
+                raise HTTPFailure('小红书原图无法解码，图片核验未完成', kind='invalid_response') from None
+        finally:
+            response.close()
+
     def statuses(self):
-        data = self.posted().get('data') or {}
-        fields = ('id', 'display_title', 'tab_status', 'permission_code', 'time')
-        return {'notes': [{key: note.get(key) for key in fields} for note in data.get('notes', [])],
-                'page': data.get('page')}
+        """Follow the creator feed cursor; report whether its end was reached."""
+        fields = ('id', 'display_title', 'tab_status', 'permission_code', 'time',
+                  'xsec_token', 'xsec_source')
+        notes, visited, page = [], set(), 0
+        for _ in range(20):
+            if page in visited:
+                return {'notes': notes, 'complete': False}
+            visited.add(page)
+            data = self.posted(page=page).get('data')
+            if not isinstance(data, dict) or not isinstance(data.get('notes'), list):
+                raise HTTPFailure('小红书作品列表结构变化，停止回查', kind='invalid_response')
+            if any(not isinstance(note, dict) for note in data['notes']):
+                raise HTTPFailure('小红书作品条目结构变化，停止回查', kind='invalid_response')
+            notes.extend({key: note.get(key) for key in fields} for note in data['notes'])
+            next_page = data.get('page')
+            if not data['notes'] or next_page in (None, 0, -1):
+                return {'notes': notes, 'complete': True}
+            if type(next_page) is not int or next_page < 0:
+                raise HTTPFailure('小红书作品分页标记无效，停止回查', kind='invalid_response')
+            page = next_page
+        return {'notes': notes, 'complete': False}
 
     def verify(self, note_id: str, *, expected: Article | None = None, evidence=None) -> PublishResult:
         if not re.fullmatch(r'[0-9a-f]{24}', note_id):
@@ -150,30 +235,20 @@ class XHSHTTP:
         evidence = dict(evidence or {})
         if expected is not None:
             evidence.update(content_fingerprint('xiaohongshu', expected.title, strip_markdown_images(expected.body)))
-        url = f'https://www.xiaohongshu.com/explore/{note_id}'
+            evidence['media_pixels'] = [pixel_fingerprint(path) for path in expected.all_images()]
+            evidence['media_profiles'] = [image_profile(path) for path in expected.all_images()]
+        url = None
         verification = 'unavailable'
-        note, page, visited = None, 0, set()
-        for _ in range(5):
-            visited.add(page)
-            data = (self.posted() if page == 0 else self.posted(page=page)).get('data') or {}
-            if not isinstance(data, dict) or not isinstance(data.get('notes', []), list):
-                raise HTTPFailure('小红书列表结构变化，已停止核验', kind='invalid_response')
-            notes = data.get('notes', [])
-            if any(not isinstance(item, dict) for item in notes):
-                raise HTTPFailure('小红书笔记结构变化，已停止核验', kind='invalid_response')
-            note = next((item for item in notes if item.get('id') == note_id), None)
-            page = data.get('page')
-            if note or type(page) is not int or page < 0 or page in visited:
-                break
+        listing = self.statuses()
+        note = next((item for item in listing['notes'] if item.get('id') == note_id), None)
         # 小红书公开笔记要带 xsec_token（必要时 xsec_source）才能直接打开，否则匿名访问
         # 落到 404 拦截页。发布列表卡片里带这两个字段，抓到后拼成完整分享链接。
         if note:
-            token = (note.get('xsec_token') or '').strip()
-            source = (note.get('xsec_source') or '').strip()
+            token = note.get('xsec_token')
             if token:
-                url = f'https://www.xiaohongshu.com/explore/{note_id}?xsec_token={token}' \
-                    + (f'&xsec_source={source}' if source else '')
-        status, message = 'pending', '已检查的列表页未找到该笔记，不能确认发布结果'
+                url = note_url(note_id, token, note.get('xsec_source') or '')
+        status, message = 'pending', ('完整作品列表未找到该笔记，尚不能判定删除' if listing['complete']
+                                      else '已检查作品列表未找到该笔记；分页未结束，需继续核验')
         if note:
             tab = note.get('tab_status')
             if tab == 3:
@@ -188,9 +263,47 @@ class XHSHTTP:
                     images = data.get('images_list')
                     media = [item.get('fileid', '').removeprefix('spectrum/') for item in images
                              if isinstance(item, dict) and isinstance(item.get('fileid'), str)] if isinstance(images, list) else []
+                    expected_media = evidence.get('media')
+                    media_match = not expected_media or media == expected_media
+                    media_unavailable = False
+                    media_partial = False
+                    if expected_media and not media_match:
+                        pixels = evidence.get('media_pixels')
+                        if (isinstance(images, list) and isinstance(pixels, list)
+                                and len(pixels) == len(media) == len(images)
+                                and all(isinstance(value, str) and value for value in pixels)):
+                            originals = [item.get('original') for item in images]
+                            if all(isinstance(value, str) and value for value in originals):
+                                try:
+                                    media_match = [self._remote_image_hash(value) for value in originals] == pixels
+                                except HTTPFailure:
+                                    media_unavailable = True
+                            else:
+                                media_unavailable = True
+                        else:
+                            media_unavailable = True
+                        if not media_match and media_unavailable:
+                            profiles = evidence.get('media_profiles')
+                            try:
+                                actual_profiles = [[item['width'], item['height'],
+                                                    round(item['metadata']['origin_size'] * 1024)]
+                                                   for item in images] if isinstance(images, list) else []
+                            except (KeyError, TypeError, ValueError):
+                                actual_profiles = []
+                            if (isinstance(profiles, list) and len(profiles) == len(actual_profiles)
+                                    and all(isinstance(profile, list) and len(profile) == 3 for profile in profiles)
+                                    and actual_profiles == profiles and len({tuple(p) for p in profiles}) == len(profiles)):
+                                media_partial, media_unavailable = True, False
+                            else:
+                                media_unavailable = True
                     if ((evidence.get('sha256') and not content_matches('xiaohongshu', data.get('title', ''), data.get('desc', ''), evidence))
-                            or (evidence.get('media') and media != evidence['media'])):
+                            or (expected_media and not media_match and not media_partial and not media_unavailable)):
                         message, verification = '文章存在，但标题、完整正文或上传图片不一致；停止重发', 'mismatch'
+                    elif media_partial and evidence.get('sha256'):
+                        status, verification = 'published', 'published'
+                        message = '平台显示公开可见，标题正文及图片顺序、尺寸和上传大小一致；图片 ID 已变更，原图暂不可下载，未做像素核对'
+                    elif media_unavailable:
+                        message, verification = '平台已更换图片 ID，缺少原图指纹，暂不能完成图片核验', 'unavailable'
                     elif not evidence.get('sha256') or not evidence.get('media'):
                         # 平台已确认公开可见（审核通过且对外可见），此时状态本身就是发布的确证；
                         # 本地缺原稿/配图证据只意味着不做内容比对，仍应确认发布状态并回填公开链接。
@@ -229,7 +342,8 @@ class XHSHTTP:
             'Authorization': authorization, 'x-cos-security-token': info['token'],
             'Origin': self.BASE, 'Referer': self.BASE + '/', 'Content-Type': 'image/png',
         })
-        return {'file_id': file_id, 'width': width, 'height': height, 'size': len(data)}
+        return {'file_id': file_id, 'width': width, 'height': height, 'size': len(data),
+                'pixel_sha256': pixel_fingerprint(path), 'profile': [width, height, len(data)]}
 
     def publish(self, article: Article, *, checkpoint=None) -> PublishResult:
         if len(article.title) > 20 or len(article.body) > 1000:
@@ -242,7 +356,12 @@ class XHSHTTP:
         except Exception as exc:
             return PublishResult('failed', f'小红书上传阶段停止：{type(exc).__name__}', platform='xiaohongshu')
         if checkpoint:
-            checkpoint('uploaded', uploads[0]['file_id'])
+            for uploaded in uploads:
+                image_proof = ({'id': uploaded['file_id'],
+                                'pixel_sha256': uploaded.get('pixel_sha256'),
+                                'profile': uploaded.get('profile')}
+                               if uploaded.get('pixel_sha256') else uploaded['file_id'])
+                checkpoint('uploaded', image_proof)
         try:
             data = self.call('POST', '/web_api/sns/v2/note', image_payload(article, uploads), publish=True)
         except Exception as exc:
@@ -256,5 +375,5 @@ class XHSHTTP:
             try:
                 return self.verify(note_id, expected=article, evidence={'media': [up['file_id'] for up in uploads]})
             except Exception as exc:
-                return PublishResult('pending', f'小红书已接受提交，回读暂未完成：{type(exc).__name__}；不会重发', url=url, platform='xiaohongshu')
-        return PublishResult('pending', '小红书接口已接受提交；公开可见性和审核状态仍需核验', url=url, platform='xiaohongshu')
+                return PublishResult('pending', f'小红书已接受提交，回读暂未完成：{type(exc).__name__}；不会重发', platform='xiaohongshu')
+        return PublishResult('pending', '小红书接口已接受提交；公开可见性和审核状态仍需核验', platform='xiaohongshu')

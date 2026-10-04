@@ -110,7 +110,7 @@ class SessionCommandTests(unittest.TestCase):
             payload = out.call_args[0][0]
             self.assertIn('storage_root', payload)
             self.assertEqual(payload['sessions']['zhihu']['status'], 'needs_login')
-            self.assertEqual(set(payload['sessions']), {'xiaohongshu', 'zhihu', 'toutiao'})
+            self.assertEqual(set(payload['sessions']), {'xiaohongshu', 'zhihu', 'toutiao', 'netease', 'sohu'})
 
     def test_reset_removes_credential_and_qr(self):
         with TemporaryDirectory(dir=PROJECT_ROOT) as tmp:
@@ -126,6 +126,21 @@ class SessionCommandTests(unittest.TestCase):
 
 
 class LoginReuseAndRefreshTests(unittest.TestCase):
+    def test_network_failure_does_not_replace_existing_login(self):
+        with TemporaryDirectory(dir=PROJECT_ROOT) as tmp:
+            store = StorageLayout(Path(tmp))
+            cred = store.credentials('toutiao')
+            cred.write_text(json.dumps({'account_id': 'abc'}))
+            cred.chmod(0o600)
+            unavailable = _FakeClient(account_result=HTTPFailure('网络暂不可达', kind='http_error'))
+            with patch('mulpubcli.__main__._load_client', return_value=unavailable), \
+                 patch('mulpubcli.__main__._new_client') as new_client, \
+                 patch('mulpubcli.__main__._out') as out:
+                code = _cmd_login(_args('toutiao'), store)
+            self.assertEqual(code, 1)
+            new_client.assert_not_called()
+            self.assertEqual(out.call_args[0][0]['kind'], 'http_error')
+
     def test_login_reuses_valid_authenticated_session(self):
         with TemporaryDirectory(dir=PROJECT_ROOT) as tmp:
             store = StorageLayout(Path(tmp))
@@ -151,12 +166,14 @@ class LoginReuseAndRefreshTests(unittest.TestCase):
             fresh_client = _FakeClient()
             with patch('mulpubcli.__main__._load_client', side_effect=[stale_client]), \
                  patch('mulpubcli.__main__._new_client', return_value=fresh_client), \
-                 patch('mulpubcli.__main__._out') as out:
+                 patch('mulpubcli.__main__._out') as out, \
+                 patch('mulpubcli.login_flow.time.sleep'):
                 code = _cmd_login(_args('toutiao'), store)
             self.assertEqual(code, 0)
             # Probe failed => fresh anonymous QR is minted to replace the stale session.
             self.assertEqual(fresh_client.start_calls, 1)
-            self.assertEqual(out.call_args[0][0]['status'], 'waiting')
+            self.assertEqual([call.args[0]['status'] for call in out.call_args_list],
+                             ['waiting', 'authenticated'])
 
 
 class XHSStaleRecoveryTests(unittest.TestCase):
