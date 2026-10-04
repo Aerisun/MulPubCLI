@@ -165,6 +165,14 @@ class XHSHTTP:
             page = data.get('page')
             if note or type(page) is not int or page < 0 or page in visited:
                 break
+        # 小红书公开笔记要带 xsec_token（必要时 xsec_source）才能直接打开，否则匿名访问
+        # 落到 404 拦截页。发布列表卡片里带这两个字段，抓到后拼成完整分享链接。
+        if note:
+            token = (note.get('xsec_token') or '').strip()
+            source = (note.get('xsec_source') or '').strip()
+            if token:
+                url = f'https://www.xiaohongshu.com/explore/{note_id}?xsec_token={token}' \
+                    + (f'&xsec_source={source}' if source else '')
         status, message = 'pending', '已检查的列表页未找到该笔记，不能确认发布结果'
         if note:
             tab = note.get('tab_status')
