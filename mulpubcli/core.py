@@ -2,7 +2,8 @@
 
 Article
     title       : str          — 文章标题（从 Markdown 第一行 # 提取）
-    body        : str          — 正文 Markdown 原文（不含标题行）
+    summary     : str | None   — 文章摘要（从 <!-- summary: ... --> 指令提取，可为空）
+    body        : str          — 正文 Markdown 原文（不含标题行、封面与摘要指令）
     cover       : Path         — 封面图片本地路径（必须存在）
     body_images : tuple[Path]  — 正文中引用的本地图片路径列表（自动提取，可为空）
 
@@ -27,6 +28,9 @@ _MD_IMG_RE = re.compile(r'!\[[^\]]*\]\(([^)]+)\)')
 # Regex to detect a cover directive line: <!-- cover: path -->
 # Matches a full standalone line (trims surrounding whitespace), not inline/cross-line.
 _COVER_RE = re.compile(r'^\s*<!--\s*cover\s*:\s*(.+?)\s*-->\s*$')
+# Regex to start a summary directive: <!-- summary: ... --> (may span lines to -->).
+# 摘要与本仓库 `Article.content` 的 `<!-- summary: ... -->` 特殊语法对齐。
+_SUMMARY_START_RE = re.compile(r'^\s*<!--\s*summary\s*:\s*(.*)$')
 
 
 def _is_local(src: str) -> bool:
@@ -62,6 +66,7 @@ class Article:
     title: str
     body: str                           # Raw Markdown (no title line)
     cover: Path                         # Cover image, absolute
+    summary: str | None = None          # From <!-- summary: ... --> directive
     body_images: tuple[Path, ...] = field(default_factory=tuple)  # In-body local images
     source_dir: Path | None = field(default=None)  # Markdown file dir, for relative image resolution
 
@@ -79,18 +84,33 @@ class Article:
 
         title = lines[0][2:].strip()
 
-        # Scan for the cover directive line and remove it from the body.
+        # Scan for the cover / summary directives and remove them from the body.
         # 封面只能来自稿件内 <!-- cover: 路径 --> 指令，无独立 --cover 参数。
         cover: Path | None = None
+        summary: str | None = None
         kept_lines: list[str] = []
-        for line in lines[1:]:
+        i = 0
+        n = len(lines)
+        while i < n:
+            line = lines[i]
             m = _COVER_RE.fullmatch(line.strip())
             if m is not None and cover is None:
                 raw = m.group(1).strip()
                 p = Path(raw) if Path(raw).is_absolute() else (base_dir / raw)
                 cover = p.resolve()
-            else:
-                kept_lines.append(line)
+                i += 1
+                continue
+            s = _SUMMARY_START_RE.match(line)
+            if s is not None and summary is None:
+                chunk = s.group(1)
+                i += 1
+                while i < n and "-->" not in chunk:
+                    chunk += "\n" + lines[i]
+                    i += 1
+                summary = chunk.split("-->", 1)[0].strip()
+                continue
+            kept_lines.append(line)
+            i += 1
 
         body = "\n".join(kept_lines).strip()
 
@@ -110,7 +130,14 @@ class Article:
         if missing:
             raise ValueError(f"正文中以下本地图片不存在：{', '.join(missing)}")
 
-        return cls(title=title, body=body, cover=cover, body_images=body_images, source_dir=base_dir)
+        return cls(
+            title=title,
+            body=body,
+            cover=cover,
+            summary=summary,
+            body_images=body_images,
+            source_dir=base_dir,
+        )
 
     def all_images(self) -> tuple[Path, ...]:
         """Cover first, then body images in order — all unique local image paths."""
@@ -125,6 +152,7 @@ class Article:
             "title": self.title,
             "body_length": len(self.body),
             "cover": str(self.cover),
+            "summary": self.summary,
             "body_images_count": len(self.body_images),
             "body_images": [str(p) for p in self.body_images],
         }

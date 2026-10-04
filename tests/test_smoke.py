@@ -14,12 +14,13 @@ with tempfile.TemporaryDirectory() as tmp:
     cover.write_bytes(b"\xff\xd8\xff" + b"\x00" * 10)
     md = tmp / "art.md"
     md.write_text(
-        f"# 雾中独行\n\n<!-- cover: cover.jpg -->\n\n清晨的光线很薄，像被水洗过一样。\n\n![配图]({body_img})\n\n到了某个路口，他停下来。",
+        f"# 雾中独行\n\n<!-- cover: cover.jpg -->\n\n<!-- summary: 在浓雾与记忆之间，一个人独自走向路口 -->\n\n清晨的光线很薄，像被水洗过一样。\n\n![配图]({body_img})\n\n到了某个路口，他停下来。",
         encoding="utf-8",
     )
 
     a = Article.load(md)
     assert a.title == "雾中独行"
+    assert a.summary == "在浓雾与记忆之间，一个人独自走向路口"
     assert len(a.body_images) == 1
     assert a.body_images[0].resolve() == body_img.resolve()
     assert a.cover.resolve() == cover.resolve()
