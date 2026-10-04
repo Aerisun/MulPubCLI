@@ -468,8 +468,6 @@ class ToutiaoWeb:
             # 渲染后正文只保留可见文本与独立配图，markdown 图片语法不进入内容；
             # 与小红书一致，指纹须基于剥离图片语法后的正文计算。
             proof.update(content_fingerprint(PLATFORM, expected.title, strip_markdown_images(expected.body)))
-        if not proof.get('sha256') or not proof.get('media'):
-            return PublishResult('pending', '缺少原稿或上传图片证据，无法完整核验', platform=PLATFORM, verification='missing_evidence')
         item = self.find_article(article_id, draft=draft)
         if not item:
             return PublishResult('pending', '已检查的作品列表未找到该文章，不会重发', platform=PLATFORM, verification='unavailable')
@@ -478,6 +476,16 @@ class ToutiaoWeb:
             failed = status == 3 and type(status) is int
             return PublishResult('failed' if failed else 'pending', '头条尚未通过要求的发布状态核验', platform=PLATFORM,
                                  verification='mismatch' if status in (3, 4, 9) else 'unavailable')
+        item_id = identifier(item.get('item_id'))
+        url = f'https://www.toutiao.com/article/{item_id}/' if item_id else None
+        if not proof.get('sha256') or not proof.get('media'):
+            # 平台已返回发布状态，此时状态本身就是发布的确证；本地缺原稿/配图
+            # 证据只意味着不做内容比对，仍应确认发布状态并回填公开链接。
+            if draft:
+                return PublishResult('draft', f'头条草稿 {article_id} 已保存', platform=PLATFORM, verification='published')
+            if not item_id:
+                return PublishResult('pending', '缺少公开 item_id，不能以草稿 ID 拼接公开链接', platform=PLATFORM, verification='unavailable')
+            return PublishResult('published', '头条已发布；缺少原稿或上传图片证据，未做内容比对', url, PLATFORM, 'published')
         data = self.detail(article_id)
         html = _ArticleHTML(data.get('content'))
         covers = data.get('pgc_feed_covers')
@@ -490,13 +498,11 @@ class ToutiaoWeb:
                 or [image_identity(src) for src in html.images] != proof['media']
                 or cover_ids != proof['media'][:1]):
             return PublishResult('pending', '头条标题、完整正文、配图、封面或账号未通过核对', platform=PLATFORM, verification='mismatch')
-        item_id = identifier(item.get('item_id'))
         if draft:
             return PublishResult('draft', f'头条草稿 {article_id} 完整回读通过', platform=PLATFORM, verification='verified')
         if not item_id:
             return PublishResult('pending', '缺少公开 item_id，不能以草稿 ID 拼接公开链接', platform=PLATFORM, verification='unavailable')
-        return PublishResult('published', '头条已发表且原稿、配图与封面均回读一致；未验证其他账号展示',
-                             f'https://www.toutiao.com/article/{item_id}/', PLATFORM, 'verified')
+        return PublishResult('published', '头条已发表且原稿、配图与封面均回读一致；未验证其他账号展示', url, PLATFORM, 'verified')
 
     def publish(self, article: Article, *, checkpoint=None, public=True):
         if not 2 <= len(article.title) <= 30 or not article.body.strip() or len(article.body.encode()) > 1_000_000:

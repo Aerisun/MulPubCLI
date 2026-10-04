@@ -184,7 +184,9 @@ class XHSHTTP:
                             or (evidence.get('media') and media != evidence['media'])):
                         message, verification = '文章存在，但标题、完整正文或上传图片不一致；停止重发', 'mismatch'
                     elif not evidence.get('sha256') or not evidence.get('media'):
-                        message, verification = '文章存在且公开；缺少原稿或上传图片证据，无法完整核验', 'missing_evidence'
+                        # 平台已确认公开可见（审核通过且对外可见），此时状态本身就是发布的确证；
+                        # 本地缺原稿/配图证据只意味着不做内容比对，仍应确认发布状态并回填公开链接。
+                        status, message, verification = 'published', '平台显示公开可见；缺少原稿或上传图片证据，未做内容比对', 'published'
                     else:
                         status, verification = 'published', 'verified'
                         message = '平台显示公开可见，标题、完整正文和上传图片均通过回读核验；未验证其他账号的展示'
