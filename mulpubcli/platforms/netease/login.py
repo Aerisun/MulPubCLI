@@ -54,39 +54,74 @@ class NeteaseLogin:
         save_session(self.destination, session, user_agent=USER_AGENT,
                      network='direct', account_id=self.account_id)
 
-    def _capture_after_login(self, page) -> None:
-        """Wait for login redirects to finish setting related 163.com cookies."""
+    def _has_authenticated_cookies(self, cookies) -> bool:
+        """Require the usable NetEase session and its related account cookies."""
+        from .client import SESSION_COOKIE
+
+        required = {SESSION_COOKIE, 'P_INFO', 'S_INFO'}
+        valid_names = set()
+        for cookie in cookies:
+            name = cookie.get('name')
+            if name not in required or not cookie.get('value'):
+                continue
+            expires = cookie.get('expires', -1)
+            if (
+                not isinstance(expires, (int, float))
+                or expires < 0
+                or expires > time.time()
+            ):
+                valid_names.add(name)
+        return required.issubset(valid_names)
+
+    def _capture_after_login(self, page) -> bool:
+        """Wait for a valid login and its related 163.com cookies to settle."""
+        from .client import SESSION_COOKIE
+
+        required = {SESSION_COOKIE, 'P_INFO', 'S_INFO'}
         previous = None
         stable = 0
         for _ in range(24):
             cookies = page.context.cookies()
             marker = tuple(sorted((c.get('domain'), c.get('name'), c.get('value'))
-                                  for c in cookies if _allowed(c.get('domain', ''))))
-            authenticated = any(c.get('name') == 'NTESwebSI' and c.get('value')
-                                for c in cookies)
+                                  for c in cookies
+                                  if _allowed(c.get('domain', ''))
+                                  and c.get('name') in required))
+            authenticated = self._has_authenticated_cookies(cookies)
             stable = stable + 1 if marker == previous else 0
             if authenticated and stable >= 4:
-                break
+                self._export(page.context)
+                return True
             previous = marker
             page.wait_for_timeout(250)
-        self._export(page.context)
+        return False
 
     def _perform(self, page, browser, ctx) -> bool:
         """自动完成 URS 手机密码登录；返回 True=需要真人环节，False=已完成。"""
-        if 'login.html' not in page.url:
-            self._capture_after_login(page)
+        if (
+            'login.html' not in page.url
+            and self._has_authenticated_cookies(ctx.cookies())
+            and self._capture_after_login(page)
+        ):
             return False
         # URS iframe 往往晚于顶层 DOM 出现，等它实际载入。
         frame_deadline = time.monotonic() + 10
         urs = next((f for f in page.frames if _URS in f.url), None)
         while urs is None and time.monotonic() < frame_deadline:
             page.wait_for_timeout(100)
-            if 'login.html' not in page.url:
-                self._capture_after_login(page)
+            if (
+                'login.html' not in page.url
+                and self._has_authenticated_cookies(ctx.cookies())
+                and self._capture_after_login(page)
+            ):
                 return False
             urs = next((f for f in page.frames if _URS in f.url), None)
         if urs is None:
             return True
+        if (
+            self._has_authenticated_cookies(ctx.cookies())
+            and self._capture_after_login(page)
+        ):
+            return False
         try:
             urs.click(":text('手机号登录')", timeout=4000)
             try:
@@ -105,14 +140,23 @@ class NeteaseLogin:
                     " if(c && !c.checked) c.click(); return c?c.checked:null}")
             except Exception:
                 pass
+            page_url_before_submit = page.url
+            urs_url_before_submit = urs.url
             urs.click(".u-loginbtn", timeout=4000)
         except Exception:
             return True   # 提交未完成，交由等待/重试路径
         # 以实际跳转或验证控件为完成信号；短间隔仅用于检测跨域 iframe 状态。
         deadline = time.monotonic() + 40
         while time.monotonic() < deadline:
-            if 'login.html' not in page.url:
-                self._capture_after_login(page)
+            navigated = (
+                page.url != page_url_before_submit
+                or urs.url != urs_url_before_submit
+            )
+            if (
+                navigated
+                and self._has_authenticated_cookies(ctx.cookies())
+                and self._capture_after_login(page)
+            ):
                 return False
             try:
                 yidun = urs.eval_on_selector_all(

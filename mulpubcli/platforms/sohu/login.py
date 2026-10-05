@@ -7,8 +7,10 @@ import select
 import sys
 import tempfile
 import termios
+import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 from .client import SohuWeb, MP, USER_AGENT
 from mulpubcli.http import HTTPFailure, save_session
@@ -60,7 +62,9 @@ class SohuLogin:
     """驱动一次搜狐登录并导出凭证到持久化文件。"""
 
     def __init__(self, phone: str, password: str, destination: Path,
-                 *, account_id: str = '', on_challenge=None, mirror_port: int = 0):
+                 *, account_id: str = '', on_challenge=None, mirror_port: int = 0,
+                 sms_code_provider: Callable[[int], str] | None = None,
+                 cancel_event: threading.Event | None = None):
         if not isinstance(phone, str) or not isinstance(password, str):
             raise ValueError('搜狐手机号与密码须为字符串')
         if '\r' in phone or '\n' in phone or '\r' in password or '\n' in password:
@@ -73,6 +77,8 @@ class SohuLogin:
         self._headless = True
         self.on_challenge = on_challenge
         self.mirror_port = mirror_port
+        self.sms_code_provider = sms_code_provider
+        self.cancel_event = cancel_event
 
     def _mirror_ready(self, url: str) -> None:
         """Expose an embeddable URL without handing out cookies or a second session."""
@@ -112,9 +118,13 @@ class SohuLogin:
         if code == 9000000:
             if self._headless:
                 from mulpubcli.browser_mirror import BrowserMirror
-                with BrowserMirror(port=self.mirror_port) as mirror:
+                with BrowserMirror(
+                        port=self.mirror_port,
+                        cancel_event=self.cancel_event) as mirror:
                     response = mirror.wait_for_sms_send(
                         page, on_ready=self._mirror_ready)
+                if self.cancel_event is not None and self.cancel_event.is_set():
+                    raise HTTPFailure('搜狐登录已取消', kind='verification_required')
             else:
                 print('[搜狐] 页面要求验证码；请在浏览器里完成验证，必要时再次点击获取验证码。',
                       file=sys.stderr, flush=True)
@@ -157,16 +167,20 @@ class SohuLogin:
         sent_at_wall = time.time()
         print(f'[搜狐] 短信发送接口已确认，等待验证码（最多 {code_timeout_s} 秒）…',
               file=sys.stderr, flush=True)
-        # 2) 限时读取短信验证码；非 tty 回退到临时文件轮询。
+        # 2) 限时读取短信验证码；受托管的 edge 页面直接等待其一次性输入。
         code_file = Path(self.destination.parent) / '.dev' / 'sohu_sms_code.txt'
         code = ''
-        if sys.stdin.isatty():
+        if self.sms_code_provider is not None:
+            code = self.sms_code_provider(max(0, int(deadline - time.monotonic())))
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise HTTPFailure('搜狐登录已取消', kind='verification_required')
+        if self.sms_code_provider is None and sys.stdin.isatty():
             try:
                 code = _read_tty_code_until(
                     '请输入搜狐短信验证码（6 位，不回显）: ', deadline)
             except (EOFError, OSError, termios.error):
                 code = ''
-        if not code and time.monotonic() < deadline:
+        if self.sms_code_provider is None and not code and time.monotonic() < deadline:
             code_file.parent.mkdir(parents=True, exist_ok=True)
             print(f'[搜狐] 等待短信验证码… 将 6 位验证码写入 {code_file}',
                   file=sys.stderr, flush=True)

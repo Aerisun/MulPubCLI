@@ -73,8 +73,11 @@ view.addEventListener('pointerup',release);view.addEventListener('pointercancel'
 class BrowserMirror:
     """Temporary mini page for a person to control one live Playwright page."""
 
-    def __init__(self, *, port: int = 0):
+    def __init__(
+        self, *, port: int = 0, cancel_event: threading.Event | None = None
+    ):
         self._requested_port = port
+        self._cancel_event = cancel_event
         self._token = secrets.token_urlsafe(24)
         self._events: queue.Queue[tuple[str, float, float]] = queue.Queue(maxsize=512)
         self._frame = b''
@@ -282,6 +285,8 @@ class BrowserMirror:
         page.on('response', on_response)
         try:
             for _ in range(40):
+                if self._cancel_event is not None and self._cancel_event.is_set():
+                    raise HTTPFailure('搜狐登录已取消', kind='verification_required')
                 frame = self._capture_frame(page, tighten=True)
                 if self._clip['width'] < 500 or self._clip['height'] < 500:
                     break
@@ -292,6 +297,8 @@ class BrowserMirror:
             deadline = time.monotonic() + timeout_s
             next_frame = 0.0
             while time.monotonic() < deadline:
+                if self._cancel_event is not None and self._cancel_event.is_set():
+                    raise HTTPFailure('搜狐登录已取消', kind='verification_required')
                 self._process_events(page)
                 while pending:
                     response = pending.pop(0)
