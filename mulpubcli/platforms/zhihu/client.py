@@ -264,6 +264,9 @@ class ZhihuWeb:
             if state == 'draft':
                 return PublishResult('draft', '知乎草稿仍在，尚未公开发表',
                                      f'{self.COLUMN}/p/{article_id}/edit', 'zhihu', 'published')
+            if state == 'not_found':
+                return PublishResult('deleted', '知乎公开文章和当前账号草稿接口均返回 404；文章已不可访问，可能已删除或下架',
+                                     platform='zhihu', verification='status_only')
             return PublishResult('pending', '知乎公开文章暂不可见，尚不能判定已删除',
                                  platform='zhihu', verification='unavailable')
         HTTP.checked(data)
@@ -298,11 +301,7 @@ class ZhihuWeb:
         return PublishResult('pending', f'知乎文章 {article_id} 尚无明确的已发表状态', url, 'zhihu', verification)
 
     def article_state(self, article_id: str) -> str:
-        """实时单篇状态，供本地台账逐条回查：'published' | 'draft' | 'not_found' | 'unknown'。
-
-        知乎没有"我的已发布文章"列表接口，只能按 ID 查单篇。404 视为已删除，
-        由调用方把它从发布列表移出。
-        """
+        """Read public and owner draft endpoints; two 404s mean inaccessible to this account."""
         if not article_id.isdigit():
             raise ValueError('知乎文章 ID 必须是数字')
         try:

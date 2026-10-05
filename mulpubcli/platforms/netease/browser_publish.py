@@ -12,7 +12,7 @@ ursToken 会被风控打回到受限状态（文章不进已发布列表）。�
 随后核对编辑器实际图文顺序，并选择正文首图作为封面。平台自家守卫
 当场铸造并校验 ursToken。
 
-安全：所有请求走 mihomo 代理；会话 Cookie 从项目凭证注入，密码不落盘；浏览器瞬启瞬关。
+安全：所有请求走 mihomo 代理；会话 Cookie 从项目凭证注入；浏览器瞬启瞬关。
 """
 from __future__ import annotations
 

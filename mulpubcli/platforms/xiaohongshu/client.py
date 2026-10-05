@@ -168,7 +168,8 @@ class XHSHTTP:
         if response.get('success') is not True:
             code = response.get('code', response.get('result'))
             code = code if type(code) is int else 'unknown'
-            raise HTTPFailure(f'小红书拒绝请求（code={code}），已停止且不重试')
+            raise HTTPFailure(f'小红书拒绝请求（code={code}），已停止且不重试',
+                              code=code if type(code) is int else None)
         return response
 
     def posted(self, page=0):
@@ -241,6 +242,14 @@ class XHSHTTP:
         verification = 'unavailable'
         listing = self.statuses()
         note = next((item for item in listing['notes'] if item.get('id') == note_id), None)
+        if note is None and listing['complete']:
+            try:
+                self.detail(note_id)
+            except HTTPFailure as exc:
+                if exc.code == -9106:
+                    return PublishResult('deleted', '小红书单篇详情返回 -9106：该笔记已被删除；公开链接已失效',
+                                         platform='xiaohongshu', verification='verified')
+                raise
         # 小红书公开笔记要带 xsec_token（必要时 xsec_source）才能直接打开，否则匿名访问
         # 落到 404 拦截页。发布列表卡片里带这两个字段，抓到后拼成完整分享链接。
         if note:

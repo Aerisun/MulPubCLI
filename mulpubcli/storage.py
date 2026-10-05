@@ -6,7 +6,9 @@
     ├── auth/               # 登录凭证，权限 600，永久保留
     │   ├── xiaohongshu.json
     │   ├── zhihu.json
-    │   └── toutiao.json
+    │   ├── toutiao.json
+    │   ├── netease.json / sohu.json
+    │   └── netease-login.json / sohu-login.json  # 续期用账号密码，权限 600
     ├── qr/                 # 临时二维码 PNG，超过 10 分钟自动清理
     │   ├── xiaohongshu-login.png
     │   ├── zhihu-login.png
@@ -67,6 +69,10 @@ class StorageLayout:
     def credentials(self, platform: str) -> Path:
         """Permanent credentials file for a platform. Stored at 600."""
         return self.auth_dir / f"{platform}.json"
+
+    def login_secret(self, platform: str) -> Path:
+        """Local account/password pair used to renew a browser login."""
+        return self.auth_dir / f"{platform}-login.json"
 
     def qr_image(self, platform: str) -> Path:
         """Temporary QR code PNG for login."""

@@ -26,7 +26,7 @@ mulpubcli list
 │   ├── core.py                # 文章模型与内容指纹
 │   ├── http.py                # HTTP 会话与请求封装
 │   ├── browser.py             # 按需启动的浏览器登录组件
-│   ├── ledger.py              # 发布记录与重复提交控制
+│   ├── ledger.py              # 发布记录与提交跟踪
 │   ├── renderer.py            # Markdown 与图片渲染
 │   ├── storage.py             # 本地数据路径管理
 │   └── platforms/             # 各平台登录、发布与核验实现
@@ -47,4 +47,3 @@ mulpubcli list
 ├── pyproject.toml             # 安装配置与依赖
 └── README.md
 ```
-

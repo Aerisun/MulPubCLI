@@ -46,7 +46,7 @@ READBACK_PLATFORMS = PLATFORMS
 # Platform client factory
 # ─────────────────────────────────────────────
 
-def _load_client(platform: str, store: StorageLayout, *, proxy: str | None = None):
+def _load_client_raw(platform: str, store: StorageLayout, *, proxy: str | None = None):
     """Load a platform client from saved credentials. Raises if credentials missing."""
     path = store.credentials(platform)
     if not path.is_file():
@@ -75,6 +75,109 @@ def _load_client(platform: str, store: StorageLayout, *, proxy: str | None = Non
         raise ValueError(f"不支持的平台: {platform}")
     _apply_proxy(client, proxy)
     return client
+
+
+def _load_client(platform: str, store: StorageLayout, *, proxy: str | None = None,
+                 auto_renew: bool = True):
+    """Check Sohu/NetEase authentication before an operation, renewing when expired."""
+    renewable = auto_renew and platform in ('sohu', 'netease')
+    try:
+        client = _load_client_raw(platform, store, proxy=proxy)
+    except FileNotFoundError:
+        if not renewable:
+            raise
+        _auto_renew_credentials(platform, store, proxy=proxy)
+        client = _load_client_raw(platform, store, proxy=proxy)
+    if not renewable:
+        return client
+    try:
+        client.account()
+        return client
+    except HTTPFailure as exc:
+        _close(client)
+        if exc.kind != 'authentication_required':
+            raise
+    except Exception:
+        _close(client)
+        raise
+    _auto_renew_credentials(platform, store, proxy=proxy)
+    client = _load_client_raw(platform, store, proxy=proxy)
+    try:
+        client.account()
+        return client
+    except Exception:
+        _close(client)
+        raise
+
+
+def _saved_login_pair(store: StorageLayout, platform: str) -> tuple[str, str] | None:
+    path = store.login_secret(platform)
+    if not path.exists():
+        return None
+    if path.is_symlink() or path.stat().st_mode & 0o077:
+        raise HTTPFailure('保存的登录信息权限无效，请将文件权限设为 600', kind='local_state_invalid')
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        raise HTTPFailure('保存的登录信息无法读取', kind='local_state_invalid') from None
+    if (not isinstance(data, dict) or any(
+            not isinstance(data.get(key), str) or not data[key]
+            or '\r' in data[key] or '\n' in data[key]
+            for key in ('phone', 'password'))):
+        raise HTTPFailure('保存的登录信息结构无效', kind='local_state_invalid')
+    return data['phone'], data['password']
+
+
+def _save_login_pair(store: StorageLayout, platform: str, phone: str, password: str) -> None:
+    private_json(store.login_secret(platform), {'phone': phone, 'password': password})
+
+
+def _auto_renew_credentials(platform: str, store: StorageLayout, *, proxy: str | None = None) -> None:
+    """Reauthenticate once using a saved pair, after a confirmed expiry."""
+    cred_path = store.credentials(platform)
+    with session_lock(cred_path):
+        # Another process may have renewed the credential before this lock was acquired.
+        if cred_path.is_file():
+            current = _load_client_raw(platform, store, proxy=proxy)
+            try:
+                current.account()
+                return
+            except HTTPFailure as exc:
+                if exc.kind != 'authentication_required':
+                    raise
+            finally:
+                _close(current)
+
+        pair = _saved_login_pair(store, platform)
+        if pair is None:
+            phone_key, pass_key = (('NETEASE_PHONE', 'NETEASE_PASS') if platform == 'netease'
+                                   else ('SOHU_PHONE', 'SOHU_PASSWORD'))
+            phone, password = os.environ.get(phone_key, ''), os.environ.get(pass_key, '')
+            if not phone or not password:
+                raise HTTPFailure(
+                    f'{PLATFORM_NAMES[platform]}登录态失效；请先执行 login {platform} --refresh '
+                    '并提供手机号和密码，以便保存自动续期信息',
+                    kind='authentication_required')
+            pair = (phone, password)
+        phone, password = pair
+        expected_id = ''
+        if cred_path.is_file():
+            try:
+                metadata = json.loads(cred_path.read_text(encoding='utf-8'))
+                expected_id = str(metadata.get('wemedia_id') or metadata.get('account_id') or '')
+            except (OSError, ValueError, AttributeError):
+                raise HTTPFailure('旧登录凭证无法读取，停止自动续期', kind='local_state_invalid') from None
+
+        if platform == 'netease':
+            from .platforms.netease.login import NeteaseLogin
+            result = NeteaseLogin(phone, password, cred_path, account_id=expected_id).run(headless=True)
+        else:
+            from .platforms.sohu.login import SohuLogin
+            result = SohuLogin(phone, password, cred_path, account_id=expected_id).run(headless=True)
+        if result.get('status') != 'ok':
+            kind = 'verification_required' if result.get('status') == 'need_human' else 'authentication_required'
+            raise HTTPFailure(result.get('message') or f'{PLATFORM_NAMES[platform]}自动续期未完成', kind=kind)
+        _save_login_pair(store, platform, phone, password)
 
 
 def _new_client(platform: str, *, proxy: str | None = None):
@@ -198,7 +301,7 @@ def _probe_account(platform: str, store: StorageLayout, cred_path: Path, *, prox
     """
     client = None
     try:
-        client = _load_client(platform, store, proxy=proxy)
+        client = _load_client(platform, store, proxy=proxy, auto_renew=False)
         info = client.account()
         client.save(cred_path)
     except HTTPFailure as exc:
@@ -451,7 +554,8 @@ def _netease_login(args, store: StorageLayout) -> int:
     """网易号登录：瞬时无头浏览器账号密码登录（默认，自刷新）。
 
     走 mulpubcli.browser 拉起瞬时 Chromium 自动填网易 URS 手机号+密码，成功导出
-    会话 Cookie 后立即关闭浏览器，随后纯 HTTP account() 核验写回凭证（不落盘密码）。
+    会话 Cookie 后立即关闭浏览器，随后纯 HTTP account() 核验写回凭证；
+    登录成功时将手机号与密码保存到独立的本地登录信息文件，供凭证失效后续期。
     已有有效登录态时直接复用；失效时自动用账号密码重新登录（self refresh）。
     """
     platform = "netease"
@@ -465,9 +569,14 @@ def _netease_login(args, store: StorageLayout) -> int:
             _out(probe)
             return 0 if probe.get("status") == "authenticated" else 1
 
-    # 账号密码来源：--phone/--password → 环境变量 → 交互输入。
-    phone = getattr(args, "phone", None) or os.environ.get("NETEASE_PHONE", "")
-    password = getattr(args, "password", None) or os.environ.get("NETEASE_PASS", "")
+    # 账号密码来源：参数 → 环境变量 → 已保存的登录信息 → 交互输入。
+    try:
+        saved = _saved_login_pair(store, platform) or ('', '')
+    except HTTPFailure as exc:
+        _out(exc.as_dict())
+        return 1
+    phone = getattr(args, "phone", None) or os.environ.get("NETEASE_PHONE", "") or saved[0]
+    password = getattr(args, "password", None) or os.environ.get("NETEASE_PASS", "") or saved[1]
     if not phone:
         phone = input("请输入网易号手机号: ").strip()
     if not password:
@@ -479,6 +588,7 @@ def _netease_login(args, store: StorageLayout) -> int:
         print('[网易] 正在打开登录页并核验账号…', file=sys.stderr, flush=True)
         result = NeteaseLogin(phone, password, cred_path).run(headless=True)
         if result.get('status') == 'ok':
+            _save_login_pair(store, platform, phone, password)
             _out(_login_result(platform, cred_path, info=result,
                                message=result.get('message', '网易浏览器登录成功')))
             return 0
@@ -513,8 +623,13 @@ def _sohu_login(args, store: StorageLayout) -> int:
               'message': '当前终端没有图形显示；请在可打开浏览器窗口的桌面或图形转发终端执行'})
         return 1
 
-    phone = getattr(args, "phone", None) or os.environ.get("SOHU_PHONE", "")
-    password = getattr(args, "password", None) or os.environ.get("SOHU_PASSWORD", "")
+    try:
+        saved = _saved_login_pair(store, platform) or ('', '')
+    except HTTPFailure as exc:
+        _out(exc.as_dict())
+        return 1
+    phone = getattr(args, "phone", None) or os.environ.get("SOHU_PHONE", "") or saved[0]
+    password = getattr(args, "password", None) or os.environ.get("SOHU_PASSWORD", "") or saved[1]
     if not phone:
         phone = input("请输入搜狐手机号: ").strip()
     if not password:
@@ -527,6 +642,7 @@ def _sohu_login(args, store: StorageLayout) -> int:
         print('[搜狐] 正在打开登录页并核验账号…', file=sys.stderr, flush=True)
         result = SohuLogin(phone, password, cred_path).run(headless=not show_browser)
         if result.get('status') == 'ok':
+            _save_login_pair(store, platform, phone, password)
             _out(_login_result(platform, cred_path, info=result,
                                message=result.get('message', '搜狐浏览器登录成功')))
             return 0
@@ -637,6 +753,8 @@ def _cmd_reset(args, store: StorageLayout) -> int:
     qr = store.qr_image(args.platform)
     removed = []
     targets = [path, qr]
+    if args.platform in ('netease', 'sohu'):
+        targets.append(store.login_secret(args.platform))
     if args.platform == 'xiaohongshu':
         targets.extend((store.auth_dir / 'xiaohongshu-login.json',
                         store.auth_dir / 'xiaohongshu-sms-login.json'))
@@ -690,6 +808,8 @@ def _toutiao_status(status) -> str:
 
 def _netease_status(status) -> str:
     """网易内容状态 → 可读状态。"""
+    if status == 'deleted':
+        return 'deleted'
     if isinstance(status, str) and status.startswith('published'):
         return 'published'
     if status == 'draft':
@@ -814,9 +934,9 @@ def _list_zhihu(store: StorageLayout, *, proxy: str | None = None) -> dict:
             try:
                 evidence = ledger.verification_evidence('zhihu', item['id'])
                 checked = client.verify(item['id'], evidence=evidence)
-                if checked.status in ('published', 'draft') or checked.verification == 'mismatch':
+                if checked.status in ('published', 'draft', 'deleted') or checked.verification == 'mismatch':
                     item.update(status=checked.status, verification=checked.verification,
-                                url=checked.url or item.get('url'))
+                                url=(None if checked.status == 'deleted' else checked.url or item.get('url')))
                     if checked.verification == 'verified':
                         item.pop('check', None)
                     else:
@@ -832,8 +952,25 @@ def _list_zhihu(store: StorageLayout, *, proxy: str | None = None) -> dict:
         _close(client)
 
 
+def _missing_deleted_rows(platform: str, store: StorageLayout, client, rows: list[dict]) -> None:
+    """Check missing tracked IDs individually; only explicit deletion evidence changes status."""
+    listed_ids = {str(row['id']) for row in rows if row.get('id')}
+    for local in _ledger_items(platform, store):
+        article_id = local.get('id')
+        if not article_id or article_id in listed_ids or local.get('status') == 'deleted':
+            continue
+        try:
+            checked = client.verify(article_id)
+        except (HTTPFailure, ValueError, OSError):
+            continue
+        if checked.status == 'deleted':
+            rows.append({'id': article_id, 'title': local['title'], 'status': 'deleted',
+                         'published_at': local.get('published_at'), 'url': None,
+                         'check': checked.message, 'verification': checked.verification})
+
+
 def _list_platform(platform: str, store: StorageLayout, *, proxy: str | None = None) -> dict:
-    """一个平台的动态发布列表；实时读平台时删除项自然消失。"""
+    """Read the platform feed and resolve tracked missing IDs when possible."""
     if platform == "zhihu":
         return _list_zhihu(store, proxy=proxy)
     client = _load_client(platform, store, proxy=proxy)
@@ -850,6 +987,7 @@ def _list_platform(platform: str, store: StorageLayout, *, proxy: str | None = N
                       "check": (None if n.get('xsec_token') else '缺少分享令牌，暂不能生成可直接打开的链接')}
                      for n in notes if isinstance(n.get('id'), str)
                      and _is_hex24(n['id'])]
+            _missing_deleted_rows(platform, store, client, items)
             return {"source": "live", "complete": listing.get('complete', False), "items": items}
         if platform == "toutiao":
             rows = client.list_articles()
@@ -858,6 +996,7 @@ def _list_platform(platform: str, store: StorageLayout, *, proxy: str | None = N
                       "published_at": _fmt_time(r.get('published_at')),
                       "url": f"https://www.toutiao.com/article/{r['item_id']}/" if r.get('item_id') else None}
                      for r in rows]
+            _missing_deleted_rows(platform, store, client, items)
             return {"source": "live", "complete": getattr(client, '_last_list_complete', False),
                     "items": items}
         if platform == "netease":
@@ -865,17 +1004,33 @@ def _list_platform(platform: str, store: StorageLayout, *, proxy: str | None = N
             items = [{"id": r['id'], "title": r['title'],
                       "status": _netease_status(r.get('status')),
                       "published_at": _fmt_time(r.get('published_at')),
+                      "check": ('网易作品列表显示文章已下线或删除' if _netease_status(r.get('status')) == 'deleted'
+                                else None),
                       "url": (f"https://mp.163.com/subscribe_v4/index.html#/article-publish/{r['id']}"
                               if _netease_status(r.get('status')) == 'draft'
                               else f"https://www.163.com/dy/article/{r['id']}.html"
                               if _netease_status(r.get('status')) == 'published' else None)}
                      for r in rows]
+            _missing_deleted_rows(platform, store, client, items)
             return {"source": "live", "complete": getattr(client, '_last_list_complete', False),
                     "items": items}
         if platform == "sohu":
             rows = client.list_articles()
+            listed_ids = {str(row['id']) for row in rows}
+            for local in _ledger_items('sohu', store):
+                article_id = local.get('id')
+                if not article_id or article_id in listed_ids or not article_id.isdigit():
+                    continue
+                try:
+                    detail = client.article_detail(article_id)
+                except (HTTPFailure, ValueError, OSError) as exc:
+                    detail = {**local, 'check': f'搜狐单篇详情暂不可读：{exc}；保留本地状态'}
+                if detail is None:
+                    detail = {**local, 'check': '搜狐作品列表和单篇详情均未找到；不能据此断定已删除'}
+                rows.append(detail)
             items = [{"id": row['id'], "title": row['title'], "status": row['status'],
-                      "published_at": _fmt_time(row.get('published_at')), "url": row.get('url')}
+                      "published_at": _fmt_time(row.get('published_at')), "url": row.get('url'),
+                      "check": row.get('check')}
                      for row in rows]
             return {"source": "live", "complete": getattr(client, '_last_list_complete', False),
                     "items": items}
@@ -975,25 +1130,26 @@ def _ledger_items(platform: str, store: StorageLayout) -> list[dict]:
         if not isinstance(data, dict) or data.get('platform') != platform or data.get('tracked') is False:
             continue
         raw_url = data.get('url') if isinstance(data.get('url'), str) else None
-        url = _presentable_url(platform, raw_url)
+        url = None if data.get('status') == 'deleted' else _presentable_url(platform, raw_url)
         remote_id = data.get('remote_id') or (_url_id(raw_url) if raw_url else None)
         status = data.get('status') or 'unknown'
         if status == 'failed' and not remote_id and not raw_url:
             # Nothing was accepted remotely; keep the attempt in `status`, not the article list.
             continue
-        if not url and remote_id:
+        if not url and remote_id and status != 'deleted':
             if platform == 'zhihu':
                 suffix = '/edit' if status == 'draft' else ''
                 url = f'https://zhuanlan.zhihu.com/p/{remote_id}{suffix}'
             elif platform == 'netease':
                 url = (f'https://mp.163.com/subscribe_v4/index.html#/article-publish/{remote_id}'
                        if status == 'draft' else f'https://www.163.com/dy/article/{remote_id}.html')
-        check = ('缺少分享令牌，暂不能生成可直接打开的链接' if platform == 'xiaohongshu' and raw_url and not url
+        check = ('单篇回查确认该文章已删除或下架' if status == 'deleted'
+                 else '缺少分享令牌，暂不能生成可直接打开的链接' if platform == 'xiaohongshu' and raw_url and not url
                  else '本地记录缺少文章 ID，需在平台列表核对' if not remote_id
                  else '本地记录；本次未确认在线状态')
         last = data.get('last_verification')
         verification = last.get('verification') if isinstance(last, dict) else None
-        if verification and verification != 'verified' and last.get('message'):
+        if isinstance(last, dict) and last.get('message') and (status == 'deleted' or verification != 'verified'):
             check = last['message']
         items.append({'id': str(remote_id) if remote_id else None, 'tracking_id': path.stem,
                       'title': data.get('title') or known_titles.get(_ledger_content_key(path)) or '未知',
@@ -1014,7 +1170,8 @@ def _merge_live_ledger(platform: str, store: StorageLayout, live: dict) -> dict:
         if match:
             merged = {**local, **match, 'tracking_id': local['tracking_id']}
             merged['published_at'] = _fmt_time(match.get('published_at') or local.get('published_at'))
-            merged['url'] = _presentable_url(platform, match.get('url') or local.get('url'))
+            merged['url'] = (None if match.get('status') == 'deleted' else
+                             _presentable_url(platform, match.get('url') or local.get('url')))
             if local.get('verification') == 'mismatch' and match.get('status') == 'published':
                 merged['status'] = 'pending'
             if not match.get('check') and local.get('verification') not in (None, 'verified'):
@@ -1048,8 +1205,17 @@ def _cmd_list(args, store: StorageLayout) -> int:
         try:
             live = _list_platform(platform, store, proxy=proxy)
             result[platform] = _merge_live_ledger(platform, store, live)
+            ledger = ResultLedger(store.results_dir)
+            for item in result[platform]['items']:
+                if item.get('status') == 'deleted' and item.get('id') and item.get('check'):
+                    ledger.reconcile(platform, str(item['id']), PublishResult(
+                        'deleted', item['check'], platform=platform,
+                        verification=item.get('verification') or 'verified'))
         except (HTTPFailure, ValueError, OSError) as exc:
-            fallback = tracked
+            fallback = [{**item, 'status': ('deleted' if item.get('status') == 'deleted' else 'unreachable'),
+                         'check': (f'本次平台回查失败：{exc}；上次记录为 {item.get("status") or "未知"}，'
+                                   '不能确认当前状态；链接为上次记录，未验证可访问')}
+                        for item in tracked]
             result[platform] = ({"source": "ledger", "status": "unreachable", "message": str(exc),
                                  "items": fallback, "complete": False} if fallback else
                                 {"source": "error", "status": "unreachable", "message": str(exc),
@@ -1237,26 +1403,19 @@ def _cmd_publish(args, store: StorageLayout, draft: bool = False) -> int:
         return 2
 
     ledger = ResultLedger(store.results_dir)
-    forced = getattr(args, "force", False)
-    if forced:
-        try:
-            ledger.begin_forced_attempt(platform, article)
-        except HTTPFailure as exc:
-            _out_result(PublishResult('failed', str(exc), platform=platform), title=article.title)
-            return 2
-    elif not ledger.reserve(platform, article):
-        prior = ledger.existing_submission(platform, article)
-        _out_result(PublishResult('skipped',
-                                  f'已有 {platform} 的发布记录或 24 小时额度已满，不重复提交',
-                                  url=prior.get('url'), platform=platform),
-                    article_id=prior.get('remote_id'), title=article.title)
-        return 1
+    try:
+        ledger.begin_attempt(platform, article)
+    except HTTPFailure as exc:
+        _out_result(PublishResult('failed', str(exc), platform=platform), title=article.title)
+        return 2
 
     try:
         result = _do_publish(platform, article, store, draft=draft,
                              proxy=getattr(args, "proxy", None), declaration=declaration)
     except HTTPFailure as exc:
-        result = PublishResult("pending", str(exc), platform=platform)
+        status = 'failed' if exc.kind in ('authentication_required', 'verification_required',
+                                          'account_mismatch', 'local_state_invalid') else 'pending'
+        result = PublishResult(status, str(exc), platform=platform)
     except (FileNotFoundError, PermissionError) as exc:
         result = PublishResult("failed", str(exc), platform=platform)
     except Exception as exc:
@@ -1379,6 +1538,8 @@ def _cmd_verify_one(article_id: str, platform: str | None, store: StorageLayout,
     attempts: list[dict] = []
     for p in _find_platform_for_id(store, article_id, platform):
         _, title, old_url = _ledger_lookup(store, article_id)
+        prior_deleted = any(str(item.get('id')) == str(article_id) and item.get('status') == 'deleted'
+                            for item in _ledger_items(p, store))
         if p not in READBACK_PLATFORMS:
             result = {'platform': p, 'id': str(article_id), 'title': title or '未知',
                       'status': 'unsupported', 'verification': 'unsupported',
@@ -1396,10 +1557,14 @@ def _cmd_verify_one(article_id: str, platform: str | None, store: StorageLayout,
                                       for item in _ledger_items('toutiao', store))
             checked = client.verify(str(article_id), **kwargs)
             result = {**asdict(checked), 'id': str(article_id), 'title': title or (article.title if article else '未知')}
-            result['url'] = _presentable_url(p, checked.url or old_url)
-            if p == 'xiaohongshu' and not result['url']:
+            result['url'] = (None if checked.status == 'deleted' else
+                             _presentable_url(p, checked.url or old_url))
+            if p == 'xiaohongshu' and checked.status != 'deleted' and not result['url']:
                 result['check'] = '缺少分享令牌，暂不能生成可直接打开的链接'
             ledger.reconcile(p, str(article_id), checked, evidence=evidence)
+            if prior_deleted and checked.status == 'pending' and checked.verification != 'mismatch':
+                result.update(status='deleted', url=None, verification='unavailable',
+                              message=f'上次已确认删除；本次回查未完成：{checked.message}')
         except (HTTPFailure, FileNotFoundError, PermissionError, ValueError) as exc:
             result = {'platform': p, 'id': str(article_id), 'title': title or '未知',
                       'status': 'unreachable', 'verification': 'unavailable',
@@ -1408,9 +1573,9 @@ def _cmd_verify_one(article_id: str, platform: str | None, store: StorageLayout,
             if client is not None:
                 _close(client)
         attempts.append(result)
-        if result['status'] in ('published', 'draft', 'failed'):
+        if result['status'] in ('published', 'draft', 'failed', 'deleted'):
             break
-    selected = next((r for r in attempts if r['status'] in ('published', 'draft', 'failed')),
+    selected = next((r for r in attempts if r['status'] in ('published', 'draft', 'failed', 'deleted')),
                     attempts[0] if attempts else {'id': str(article_id), 'status': 'unreachable',
                                                  'message': '无法确定文章所属平台', 'url': None})
     if as_json:
@@ -1527,17 +1692,25 @@ def _refresh_verified(platform: str, store: StorageLayout, *, proxy) -> dict:
                         kwargs['draft'] = item.get('status') == 'draft'
                     checked = client.verify(remote_id, **kwargs)
                     ledger.reconcile(platform, remote_id, checked, evidence=evidence)
-                    item.update(status=checked.status, verification=checked.verification,
-                                message=checked.message,
-                                url=_presentable_url(platform, checked.url or item.get('url')))
+                    prior_deleted = item.get('status') == 'deleted'
+                    keep_deleted = prior_deleted and checked.status == 'pending' and checked.verification != 'mismatch'
+                    item.update(status='deleted' if keep_deleted else checked.status,
+                                verification='unavailable' if keep_deleted else checked.verification,
+                                message=(f'上次已确认删除；本次回查未完成：{checked.message}'
+                                         if keep_deleted else checked.message),
+                                url=(None if checked.status == 'deleted' or keep_deleted else
+                                     _presentable_url(platform, checked.url or item.get('url'))))
                     item.pop('check', None)
                 except (HTTPFailure, ValueError, OSError) as exc:
-                    item['check'] = f'单篇回查未完成：{exc}'
+                    prior = item.get('status') or '未知'
+                    if prior != 'deleted':
+                        item['status'] = 'unreachable'
+                    item['check'] = f'单篇回查未完成：{exc}；上次状态为 {prior}，链接未重新验证'
                     result['unverified'].append(item)
                     continue
             else:
                 item.setdefault('verification', 'status_only')
-            if not item.get('url'):
+            if not item.get('url') and item.get('status') != 'deleted':
                 if not remote_id:
                     item['check'] = '本地记录缺少文章 ID，需在平台列表核对'
                 elif platform == 'xiaohongshu':
@@ -1553,6 +1726,8 @@ def _refresh_verified(platform: str, store: StorageLayout, *, proxy) -> dict:
                 result['published'].append(item)
             elif item.get('status') == 'draft':
                 result['draft'].append(item)
+            elif item.get('status') == 'deleted':
+                result['deleted'].append(item)
             elif item.get('status') in ('pending', 'unreachable'):
                 result['unverified'].append(item)
             else:
@@ -1560,6 +1735,8 @@ def _refresh_verified(platform: str, store: StorageLayout, *, proxy) -> dict:
     except (HTTPFailure, ValueError, OSError) as exc:
         for item in items:
             previous = item.get('check')
+            if item.get('status') != 'deleted':
+                item['status'] = 'unreachable'
             item['check'] = f'平台暂不可达：{exc}' + (f'；{previous}' if previous else '')
             result['unverified'].append(item)
     finally:
@@ -1571,7 +1748,6 @@ def _refresh_verified(platform: str, store: StorageLayout, *, proxy) -> dict:
 def _cmd_verify_refresh(platforms: tuple, store: StorageLayout, *, proxy, as_json: bool) -> int:
     summary: dict = {}
     articles: dict = {}
-    all_deleted: list[dict] = []
     for p in platforms:
         if p not in READBACK_PLATFORMS:
             summary[p] = {'unsupported': f'{p} 尚未接入文章在线回读'}
@@ -1586,12 +1762,9 @@ def _cmd_verify_refresh(platforms: tuple, store: StorageLayout, *, proxy, as_jso
         summary[p] = {'published': len(r['published']), 'draft': len(r['draft']),
                       'other': len(r['other']), 'unverified': len(r.get('unverified', [])),
                       'deleted': len(r['deleted'])}
-        articles[p] = [*r['published'], *r['draft'], *r['other'], *r.get('unverified', [])]
-        all_deleted.extend(r['deleted'])
+        articles[p] = [*r['published'], *r['draft'], *r['deleted'], *r['other'], *r.get('unverified', [])]
     if as_json:
         out = {'refresh': summary, 'articles': articles}
-        if all_deleted:
-            out['deletion_pending'] = [{k: v for k, v in d.items() if k != 'path'} for d in all_deleted]
         _out(out)
         return 0
     print('刷新结果：')
@@ -1736,9 +1909,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_login.add_argument("--refresh", action="store_true",
                          help="强制刷新登录（忽略现有登录态）")
     p_login.add_argument("--phone", metavar="PHONE",
-                         help="登录手机号（网易用 NETEASE_PHONE、搜狐用 SOHU_PHONE；未提供则交互提示）")
+                         help="登录手机号（网易用 NETEASE_PHONE、搜狐用 SOHU_PHONE；成功登录后保存供续期）")
     p_login.add_argument("--password", metavar="PASS",
-                         help="登录密码（网易用 NETEASE_PASS、搜狐用 SOHU_PASSWORD；未提供则交互提示且不回显）")
+                         help="登录密码（网易用 NETEASE_PASS、搜狐用 SOHU_PASSWORD；成功登录后保存供续期）")
     p_login.add_argument("--show-browser", action="store_true",
                          help="搜狐页面要求人工验证码时显示浏览器窗口（须有图形显示）")
 
@@ -1754,17 +1927,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_pub = sub.add_parser("publish", help="发布文章（正式公开）")
     p_pub.add_argument("platform", choices=PLATFORMS)
     p_pub.add_argument("--article", required=True, help="Markdown 稿件路径（第一行为 # 标题，封面用 <!-- cover: 路径 --> 指令）")
-    p_pub.add_argument("--force", action="store_true",
-                      help="强制发送：跳过本地 24 小时去重与 pending 记录拦截，直接重新投稿并记账")
     p_pub.add_argument("--declaration", choices=("none", "fiction", "ai", "marketing", "reprint", "opinion"),
                        default="none", help="搜狐创作声明；默认 none（无需声明）")
     p_draft = sub.add_parser("draft", help="保存草稿（不公开发表）")
     p_draft.add_argument("platform", choices=PLATFORMS, metavar="PLATFORM",
                          help="仅支持 zhihu、toutiao、netease；其他平台返回 unsupported")
     p_draft.add_argument("--article", required=True, help="Markdown 稿件路径（封面用 <!-- cover: 路径 --> 指令）")
-    p_draft.add_argument("--force", action="store_true",
-                        help="强制发送：跳过去重拦截，直接重新提交并记账")
-
     # verify
     p_ver = sub.add_parser("verify", help="回查文章在线状态：--id 查单篇；--platform 回查该平台正在跟踪的文章")
     p_ver.add_argument("--id", help="文章 ID（全局唯一，无需同时传 --platform，自动识别所属平台）")

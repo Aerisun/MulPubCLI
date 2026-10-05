@@ -132,6 +132,39 @@ def test_sohu_list_maps_review_and_public_states():
     assert client._last_list_complete is True
 
 
+def test_sohu_list_reads_tracked_article_detail_when_filtered_feed_omits_it(
+        tmp_path, monkeypatch, capsys):
+    _, article = _article(tmp_path)
+    store = StorageLayout(tmp_path)
+    from mulpubcli.ledger import ResultLedger
+    ResultLedger(store.results_dir).checkpoint("sohu", article, "submitted", "42")
+    client = SohuWeb.__new__(SohuWeb)
+    client.account_id = "456"
+    client.account = lambda: {"id": "456"}
+    client._write_headers = lambda: {}
+    requested = []
+
+    def request(method, url, **kwargs):
+        requested.append((method, url, kwargs.get("params")))
+        if url.endswith("/users/news"):
+            payload = {"code": 2000000, "data": {"news": [], "totalCount": 0}}
+        else:
+            payload = {"code": 2000000, "data": {"news": {
+                "id": 42, "userId": 456, "title": article.title, "status": 7,
+                "deletedBy": 1, "postTime": 1791184144000}}}
+        return SimpleNamespace(json=lambda: payload)
+
+    client.http = SimpleNamespace(request=request)
+    monkeypatch.setattr(cli, "_load_client", lambda *_a, **_k: client)
+    assert cli._cmd_list(SimpleNamespace(platform="sohu", json=True, proxy=None), store) == 0
+    item = json.loads(capsys.readouterr().out)["platforms"]["sohu"]["items"][0]
+    assert item["status"] == "deleted"
+    assert item["url"] is None
+    assert "下架" in item["check"]
+    assert any(url.endswith("/article") and params.get("newsId") == "42"
+               for _, url, params in requested)
+
+
 def test_sohu_verify_keeps_reviewing_article_pending():
     client = SohuWeb.__new__(SohuWeb)
     client.list_articles = lambda: [{"id": "42", "title": "测试标题", "status": "pending",
@@ -139,6 +172,144 @@ def test_sohu_verify_keeps_reviewing_article_pending():
     result = client.verify("42")
     assert result.status == "pending"
     assert result.verification == "unavailable"
+
+
+def test_sohu_verify_reports_explicit_deleted_detail_when_feed_omits_article():
+    client = SohuWeb.__new__(SohuWeb)
+    client.list_articles = lambda: []
+    client.article_detail = lambda article_id: {
+        "id": article_id, "title": "测试标题", "status": "deleted", "url": None,
+        "check": "搜狐详情显示文章已下架或删除（状态码 7）；公开链接不可访问"}
+    result = client.verify("42")
+    assert result.status == "deleted"
+    assert result.url is None
+    assert "状态码 7" in result.message
+
+
+def test_deleted_result_clears_public_url_but_keeps_tracked_record(tmp_path, monkeypatch, capsys):
+    _, article = _article(tmp_path)
+    store = StorageLayout(tmp_path)
+    from mulpubcli.ledger import ResultLedger
+    ledger = ResultLedger(store.results_dir)
+    ledger.checkpoint('sohu', article, 'submitted', '42')
+    ledger.save('sohu', article, PublishResult('published', '已发布',
+                'https://www.sohu.com/a/42_456', 'sohu', 'verified'))
+    fake = SimpleNamespace(verify=lambda *_a, **_k: PublishResult(
+        'deleted', '搜狐详情状态码 7', platform='sohu', verification='verified'),
+        close=lambda: None)
+    monkeypatch.setattr(cli, '_load_client', lambda *_a, **_k: fake)
+    assert cli._cmd_verify_one('42', 'sohu', store, proxy=None, as_json=True) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result['status'] == 'deleted'
+    assert result['url'] is None
+    item = cli._ledger_items('sohu', store)[0]
+    assert item['status'] == 'deleted'
+    assert item['url'] is None
+    assert ledger.reconcile('sohu', '42', PublishResult(
+        'pending', '本次详情暂不可读', platform='sohu', verification='unavailable'))
+    assert cli._ledger_items('sohu', store)[0]['status'] == 'deleted'
+    fake.verify = lambda *_a, **_k: PublishResult(
+        'pending', '本次详情暂不可读', platform='sohu', verification='unavailable')
+    assert cli._cmd_verify_one('42', 'sohu', store, proxy=None, as_json=True) == 1
+    retry = json.loads(capsys.readouterr().out)
+    assert retry['status'] == 'deleted'
+    assert retry['url'] is None
+
+
+@pytest.mark.parametrize('platform,remote_id', [
+    ('netease', 'L8EIRMO70556PYDT'), ('toutiao', '7692401631350047232')])
+def test_list_reads_missing_tracked_article_and_persists_explicit_deletion(
+        platform, remote_id, tmp_path, monkeypatch, capsys):
+    _, article = _article(tmp_path)
+    store = StorageLayout(tmp_path)
+    from mulpubcli.ledger import ResultLedger
+    ledger = ResultLedger(store.results_dir)
+    ledger.checkpoint(platform, article, 'submitted', remote_id)
+    ledger.save(platform, article, PublishResult(
+        'published', '已发布', f'https://example.com/{remote_id}', platform, 'published'))
+    fake = SimpleNamespace(list_articles=lambda: [], verify=lambda *_a, **_k: PublishResult(
+        'deleted', '单篇详情明确显示已删除', platform=platform, verification='verified'),
+        _last_list_complete=True, close=lambda: None)
+    monkeypatch.setattr(cli, '_load_client', lambda *_a, **_k: fake)
+    assert cli._cmd_list(SimpleNamespace(platform=platform, json=True, proxy=None), store) == 0
+    item = json.loads(capsys.readouterr().out)['platforms'][platform]['items'][0]
+    assert item['status'] == 'deleted'
+    assert item['url'] is None
+    assert cli._ledger_items(platform, store)[0]['status'] == 'deleted'
+
+
+def test_xhs_list_persists_explicit_deleted_code(tmp_path, monkeypatch, capsys):
+    _, article = _article(tmp_path)
+    store = StorageLayout(tmp_path)
+    from mulpubcli.ledger import ResultLedger
+    ledger = ResultLedger(store.results_dir)
+    note_id = 'a' * 24
+    ledger.checkpoint('xiaohongshu', article, 'submitted', note_id)
+    ledger.save('xiaohongshu', article, PublishResult(
+        'published', '曾发布', 'https://www.xiaohongshu.com/explore/' + note_id + '?xsec_token=old',
+        'xiaohongshu', 'published'))
+    fake = SimpleNamespace(statuses=lambda: {'notes': [], 'complete': True},
+                           verify=lambda *_a, **_k: PublishResult(
+                               'deleted', '详情返回 -9106：该笔记已被删除',
+                               platform='xiaohongshu', verification='verified'),
+                           close=lambda: None)
+    monkeypatch.setattr(cli, '_load_client', lambda *_a, **_k: fake)
+    assert cli._cmd_list(SimpleNamespace(platform='xiaohongshu', json=True, proxy=None), store) == 0
+    item = json.loads(capsys.readouterr().out)['platforms']['xiaohongshu']['items'][0]
+    assert item['status'] == 'deleted'
+    assert item['url'] is None
+    assert cli._ledger_items('xiaohongshu', store)[0]['status'] == 'deleted'
+
+
+def test_list_auth_error_displays_unreachable_instead_of_stale_published(
+        tmp_path, monkeypatch, capsys):
+    _, article = _article(tmp_path)
+    store = StorageLayout(tmp_path)
+    from mulpubcli.ledger import ResultLedger
+    from mulpubcli.http import HTTPFailure
+    ledger = ResultLedger(store.results_dir)
+    ledger.checkpoint('xiaohongshu', article, 'submitted', 'a' * 24)
+    ledger.save('xiaohongshu', article, PublishResult(
+        'published', '曾发布', 'https://www.xiaohongshu.com/explore/' + 'a' * 24 + '?xsec_token=old',
+        'xiaohongshu', 'published'))
+    monkeypatch.setattr(cli, '_load_client', lambda *_a, **_k: (_ for _ in ()).throw(
+        HTTPFailure('HTTP 401', status_code=401)))
+    assert cli._cmd_list(SimpleNamespace(platform='xiaohongshu', json=True, proxy=None), store) == 0
+    item = json.loads(capsys.readouterr().out)['platforms']['xiaohongshu']['items'][0]
+    assert item['status'] == 'unreachable'
+    assert 'HTTP 401' in item['check']
+
+
+def test_verify_refresh_keeps_deleted_article_in_tracking_output(tmp_path, monkeypatch, capsys):
+    item = {'id': '42', 'title': '测试标题', 'status': 'deleted', 'url': None,
+            'check': '单篇详情显示已删除'}
+    monkeypatch.setattr(cli, '_refresh_platform', lambda *_a, **_k: {
+        'published': [], 'draft': [], 'deleted': [item], 'other': [], 'unverified': []})
+    assert cli._cmd_verify_refresh(('sohu',), StorageLayout(tmp_path), proxy=None, as_json=True) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result['refresh']['sohu']['deleted'] == 1
+    assert result['articles']['sohu'] == [item]
+
+
+def test_verify_refresh_401_does_not_display_stale_published_status(tmp_path, monkeypatch):
+    _, article = _article(tmp_path)
+    store = StorageLayout(tmp_path)
+    from mulpubcli.ledger import ResultLedger
+    from mulpubcli.http import HTTPFailure
+    ledger = ResultLedger(store.results_dir)
+    ledger.checkpoint('xiaohongshu', article, 'submitted', 'a' * 24)
+    ledger.save('xiaohongshu', article, PublishResult(
+        'published', '曾发布', 'https://www.xiaohongshu.com/explore/' + 'a' * 24 + '?xsec_token=old',
+        'xiaohongshu', 'published'))
+    monkeypatch.setattr(cli, '_list_platform', lambda *_a, **_k: {
+        'source': 'ledger', 'complete': False, 'items': []})
+    monkeypatch.setattr(cli, '_load_client', lambda *_a, **_k: SimpleNamespace(
+        verify=lambda *_a, **_k: (_ for _ in ()).throw(HTTPFailure('HTTP 401', status_code=401)),
+        close=lambda: None))
+    result = cli._refresh_verified('xiaohongshu', store, proxy=None)
+    assert result['unverified'][0]['status'] == 'unreachable'
+    assert 'HTTP 401' in result['unverified'][0]['check']
+    assert cli._ledger_items('xiaohongshu', store)[0]['status'] == 'published'
 
 
 def test_sohu_verify_checks_published_body_against_original(tmp_path):
@@ -158,6 +329,23 @@ def test_sohu_verify_checks_published_body_against_original(tmp_path):
 
     assert result.status == "published"
     assert result.verification == "verified"
+
+
+def test_sohu_rewritten_cdn_image_url_keeps_published_with_partial_check(tmp_path):
+    _, article = _article(tmp_path)
+    client = SohuWeb.__new__(SohuWeb)
+    client.account_id = '456'
+    client.list_articles = lambda: [{'id': '42', 'title': article.title,
+                                     'status': 'published', 'url': 'https://www.sohu.com/a/42_456'}]
+    client._write_headers = lambda: {}
+    client.http = SimpleNamespace(request=lambda *_a, **_k: SimpleNamespace(json=lambda: {
+        'code': 2000000, 'data': {'news': {'id': 42, 'title': article.title,
+            'cover': 'https://q1.itc.cn/rewritten.jpg', 'content': '<p>正文。</p>'}}}))
+    result = client.verify('42', expected=article,
+                           evidence={'media': ['https://res.mp.sohu.com/upload.jpg']})
+    assert result.status == 'published'
+    assert result.verification == 'published'
+    assert '图片' in result.message
 
 
 def test_sohu_verify_does_not_claim_full_match_without_media_evidence(tmp_path):

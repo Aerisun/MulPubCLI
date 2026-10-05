@@ -70,6 +70,17 @@ def test_xhs_minus_one_page_marks_end_of_real_creator_feed():
     assert result["notes"][0]["xsec_token"] == "share-token"
 
 
+def test_xhs_missing_from_complete_feed_requires_explicit_deleted_code():
+    client = XHSHTTP.__new__(XHSHTTP)
+    client.statuses = lambda: {'notes': [], 'complete': True}
+    client.detail = lambda *_a: (_ for _ in ()).throw(
+        HTTPFailure('该笔记已被删除', code=-9106))
+    result = client.verify('a' * 24)
+    assert result.status == 'deleted'
+    assert result.url is None
+    assert '-9106' in result.message
+
+
 def test_xhs_list_returns_openable_tokenized_link(tmp_path, monkeypatch):
     note_id = "a" * 24
     fake = SimpleNamespace(
@@ -271,6 +282,44 @@ def test_zhihu_public_404_checks_own_draft_before_saying_missing():
     assert result.url == "https://zhuanlan.zhihu.com/p/123456/edit"
 
 
+def test_zhihu_two_authenticated_404s_mark_tracked_article_deleted():
+    client = ZhihuWeb.__new__(ZhihuWeb)
+    client.http = SimpleNamespace(json=lambda *_a, **_k: (_ for _ in ()).throw(
+        HTTPFailure('not found', status_code=404)))
+    result = client.verify('123456')
+    assert result.status == 'deleted'
+    assert result.url is None
+    assert '404' in result.message
+
+
+def test_toutiao_explicit_pgc_delete_in_editor_detail():
+    client = ToutiaoWeb.__new__(ToutiaoWeb)
+    client.account_id = '1'
+    client.account = lambda: {'id': '1'}
+    client.find_article = lambda *_a, **_k: None
+    client.detail = lambda *_a, **_k: {
+        'pgc_id': '123456', 'media_id': '1',
+        'article_pgc': {'status': 4,
+                        'extra': '{"visibility_level_reason":"pgc_delete"}'}}
+    result = client.verify('123456')
+    assert result.status == 'deleted'
+    assert result.url is None
+    assert 'pgc_delete' in result.message
+
+
+def test_netease_owner_detail_post_state_seven_marks_deleted():
+    client = NeteaseWeb.__new__(NeteaseWeb)
+    client.wemedia_id = 'W123'
+    client.account = lambda: {'id': 'W123'}
+    client._find = lambda *_a, **_k: None
+    client.article_detail = lambda *_a, **_k: {
+        'docid': 'L8EIRMO70556PYDT', 'wemediaId': 'W123', 'postState': 7}
+    result = client.verify('L8EIRMO70556PYDT')
+    assert result.status == 'deleted'
+    assert result.url is None
+    assert '7' in result.message
+
+
 def test_zhihu_refresh_preserves_uncertain_article_in_list(tmp_path, monkeypatch):
     article = _article(tmp_path)
     store = StorageLayout(tmp_path)
@@ -299,7 +348,8 @@ def test_list_uses_ledger_link_when_live_service_is_unavailable(tmp_path, monkey
     assert code == 0
     assert result["source"] == "ledger"
     assert result["items"][0]["url"] == direct
-    assert result["items"][0]["status"] == "published"
+    assert result["items"][0]["status"] == "unreachable"
+    assert "凭证暂不可用" in result["items"][0]["check"]
 
 
 def test_verify_refresh_json_contains_each_article_link(tmp_path, monkeypatch, capsys):

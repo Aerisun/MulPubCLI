@@ -211,7 +211,7 @@ def add_cookies(session, items) -> None:
         session.cookies.set_cookie(cookie)
 
 
-def load_session(path: Path, hosts: set[str]):
+def load_session(path: Path, hosts: set[str], *, cookie_roots: set[str] | None = None):
     if path.stat().st_mode & 0o077:
         raise ValueError('凭证文件权限过宽，请设为 600')
     data = json.loads(path.read_text(encoding='utf-8'))
@@ -223,7 +223,10 @@ def load_session(path: Path, hosts: set[str]):
         if not isinstance(item, dict) or not isinstance(item.get('domain'), str):
             raise ValueError('Cookie 结构无效')
         domain = item['domain'].lstrip('.')
-        if '.' not in domain or not any(host == domain or host.endswith('.' + domain) for host in hosts):
+        allowed_for_host = any(host == domain or host.endswith('.' + domain) for host in hosts)
+        allowed_related = cookie_roots is not None and any(
+            domain == root or domain.endswith('.' + root) for root in cookie_roots)
+        if '.' not in domain or not (allowed_for_host or allowed_related):
             continue
         if any(not isinstance(item.get(key), str) or '\r' in item[key] or '\n' in item[key] for key in ('name', 'value')):
             raise ValueError('Cookie 名称或值无效')

@@ -43,6 +43,11 @@ CREATION_STATEMENTS = {'none': 0, 'fiction': 1, 'ai': 2,
                        'marketing': 3, 'reprint': 4, 'opinion': 5}
 
 
+def _article_status(value) -> str:
+    return {1: 'draft', 2: 'pending', 3: 'failed', 4: 'published',
+            5: 'pending', 7: 'deleted', 9: 'deleted'}.get(value, 'pending')
+
+
 def _cookie_header(session) -> str:
     """从会话组装 Cookie 头（含 .sohu.com 与 mp.sohu.com 两级域名）。"""
     pieces = []
@@ -287,19 +292,50 @@ class SohuWeb:
             for row in rows:
                 if not isinstance(row, dict) or not str(row.get('id') or '').isdigit():
                     continue
-                status = {1: 'draft', 2: 'pending', 3: 'failed', 4: 'published',
-                          5: 'pending', 7: 'deleted', 9: 'deleted'}.get(row.get('status'), 'pending')
+                status = _article_status(row.get('status'))
                 remote_id = str(row['id'])
                 user_id = str(row.get('userId') or self.account_id)
                 url = (f'https://www.sohu.com/a/{remote_id}_{user_id}'
                        if status == 'published' and user_id.isdigit() else None)
                 found.append({'id': remote_id, 'title': str(row.get('title') or ''),
-                              'status': status, 'published_at': row.get('postTime'), 'url': url})
+                              'status': status, 'published_at': row.get('postTime'), 'url': url,
+                              'check': (f'搜狐列表显示文章已下架或删除（状态码 {row.get("status")}）'
+                                        if status == 'deleted' else None)})
             total = data.get('totalCount')
             if len(rows) < page_size or (isinstance(total, int) and page * page_size >= total):
                 self._last_list_complete = True
                 break
         return found
+
+    def article_detail(self, article_id: str) -> dict | None:
+        """Read one known article ID even when status filters omit it from the feed."""
+        if not article_id.isdigit():
+            raise ValueError('搜狐文章 ID 必须是数字')
+        response = self.http.request('GET', DETAIL_API, params={
+            'newsId': article_id, 'accountId': self.account_id}, headers=self._write_headers())
+        try:
+            payload = response.json()
+        except ValueError:
+            raise HTTPFailure('搜狐文章详情返回无效 JSON', kind='invalid_response') from None
+        if not isinstance(payload, dict) or payload.get('code') != 2000000:
+            raise HTTPFailure('搜狐文章详情读取失败，保留本地状态', kind='invalid_response')
+        data = payload.get('data')
+        detail = data.get('news') if isinstance(data, dict) else None
+        if not isinstance(detail, dict):
+            return None
+        if str(detail.get('id')) != article_id:
+            raise HTTPFailure('搜狐文章详情 ID 与请求不一致', kind='invalid_response')
+        user_id = str(detail.get('userId') or '')
+        if self.account_id and user_id and user_id != str(self.account_id):
+            raise HTTPFailure('搜狐文章详情所属账号与当前账号不同', kind='account_mismatch')
+        status = _article_status(detail.get('status'))
+        url = (f'https://www.sohu.com/a/{article_id}_{user_id}'
+               if status == 'published' and user_id.isdigit() else None)
+        check = (f"搜狐详情显示文章已下架或删除（状态码 {detail.get('status')}）；公开链接不可访问"
+                 if status == 'deleted' else None)
+        return {'id': article_id, 'title': str(detail.get('title') or ''),
+                'status': status, 'published_at': detail.get('postTime') or detail.get('createdTime'),
+                'url': url, 'check': check}
 
     def verify(self, article_id: str, *, expected: Article | None = None, evidence=None) -> PublishResult:
         """Use the official content list to distinguish review from publication."""
@@ -307,9 +343,14 @@ class SohuWeb:
             raise ValueError('搜狐文章 ID 必须是数字')
         row = next((item for item in self.list_articles() if item['id'] == article_id), None)
         if row is None:
-            return PublishResult('pending', '搜狐列表暂未找到该文章，不能判定删除',
-                                 platform=PLATFORM, verification='unavailable')
+            row = self.article_detail(article_id)
+            if row is None:
+                return PublishResult('pending', '搜狐列表和单篇详情均未找到该文章，不能判定删除',
+                                     platform=PLATFORM, verification='unavailable')
         status = row['status']
+        if status == 'deleted':
+            return PublishResult('deleted', row.get('check') or '搜狐详情显示文章已下架或删除；公开链接不可访问',
+                                 platform=PLATFORM, verification='verified')
         if status == 'draft':
             return PublishResult('draft', '搜狐草稿仍在，尚未公开发表',
                                  platform=PLATFORM, verification='published')
@@ -357,6 +398,11 @@ class SohuWeb:
                 else:
                     images_match = actual_images == expected_images
                 if not images_match:
+                    expected_count = len(expected_images) - (1 if detail.get('cover') else 0)
+                    if len(actual_images) == expected_count and all(host and path for host, path in actual_images):
+                        return PublishResult('published',
+                                             '搜狐已发布，标题正文与图片数量一致；平台重写图片地址，未完成图片内容及顺序核对',
+                                             url, PLATFORM, 'published')
                     return PublishResult('pending', '搜狐文章已发布，但配图与原稿证据不一致',
                                          url, PLATFORM, 'mismatch')
                 return PublishResult('published', '搜狐已发布，标题、正文与配图回读一致',

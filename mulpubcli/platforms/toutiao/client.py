@@ -486,6 +486,24 @@ class ToutiaoWeb:
             proof.update(content_fingerprint(PLATFORM, expected.title, strip_markdown_images(expected.body)))
         item = self.find_article(article_id, draft=draft)
         if not item:
+            try:
+                detail = self.detail(article_id)
+            except HTTPFailure as exc:
+                if exc.status_code != 404:
+                    raise
+            else:
+                pgc = detail.get('article_pgc') or {}
+                try:
+                    extra = json.loads(pgc.get('extra') or '{}')
+                except (TypeError, ValueError):
+                    extra = {}
+                if (identifier(pgc.get('pgc_id') or detail.get('pgc_id')) == article_id
+                        and identifier(detail.get('media_id')) == getattr(self, 'account_id', None)
+                        and pgc.get('status') == 4
+                        and isinstance(extra, dict)
+                        and extra.get('visibility_level_reason') == 'pgc_delete'):
+                    return PublishResult('deleted', '头条单篇详情状态码 4，删除原因 pgc_delete；公开链接已失效',
+                                         platform=PLATFORM, verification='verified')
             return PublishResult('pending', '已检查的作品列表未找到该文章，不会重发', platform=PLATFORM, verification='unavailable')
         item_id = identifier(item.get('item_id'))
         url = f'https://www.toutiao.com/article/{item_id}/' if item_id else None

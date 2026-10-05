@@ -46,7 +46,7 @@ def _doc_id(data) -> str:
 
 
 def _content_state(item: dict) -> str:
-    """网易内容状态映射到 CLI 通用状态。0=草稿 3=已发布 1=审核中。
+    """网易内容状态映射到 CLI 通用状态。0=草稿，3=已发布，6/7=下线。
 
     真实发布记录 contentState=3（已发布），不是驳回；分发是否受限由
     `unrecomReason` 字段单独表达（如「该内容分发受限」），与 contentState 无关。
@@ -66,6 +66,8 @@ def _content_state(item: dict) -> str:
         return 'draft'
     if state == 1:
         return 'pending'
+    if state in (6, 7):
+        return 'deleted'
     return 'unknown'
 
 
@@ -102,18 +104,23 @@ class NeteaseWeb:
         self.wemedia_id = ''
         self.tname = ''
         self.path = None
+        self._cookie_expiry = {}
 
     @classmethod
     def load(cls, path: Path):
         # 网易 WAF 要求真实 Chrome TLS 指纹，凭证恢复必须落在 curl_cffi 的
         # chrome_session 上（load_session 返回的是裸 requests 会话）。这里只借用
         # load_session 做 cookie 校验与域名过滤，再把 cookie 注入 chrome_session。
-        requests_session, metadata = load_session(path, cls.HOSTS)
-        session = cls._chrome_from_cookies(iter_cookies(requests_session))
+        requests_session, metadata = load_session(path, cls.HOSTS, cookie_roots={'163.com'})
+        cookies = list(iter_cookies(requests_session))
+        session = cls._chrome_from_cookies(cookies)
         requests_session.close()
         client = cls(session=session, user_agent=metadata.get('user_agent'),
                      network=metadata.get('network', metadata.get('transport', 'direct')))
-        client.wemedia_id = str(metadata.get('wemedia_id') or '')
+        client._cookie_expiry = {
+            (cookie.name, cookie.domain, cookie.path, cookie.value): cookie.expires
+            for cookie in cookies if not cookie.is_expired() and cookie.expires is not None}
+        client.wemedia_id = str(metadata.get('wemedia_id') or metadata.get('account_id') or '')
         client.tname = str(metadata.get('tname') or '')
         client.path = path
         return client
@@ -122,6 +129,8 @@ class NeteaseWeb:
     def _chrome_from_cookies(cookies):
         session = chrome_session()
         for cookie in cookies:
+            if cookie.is_expired():
+                continue
             try:
                 session.cookies.set(cookie.name, cookie.value, domain=cookie.domain,
                                     path=cookie.path or '/', secure=bool(cookie.secure))
@@ -130,6 +139,10 @@ class NeteaseWeb:
         return session
 
     def save(self, path: Path):
+        for cookie in iter_cookies(self.http.session):
+            if cookie.expires is None:
+                cookie.expires = self._cookie_expiry.get(
+                    (cookie.name, cookie.domain, cookie.path, cookie.value))
         save_session(path, self.http.session, user_agent=self.http.session.headers['User-Agent'],
                      network=self.network, wemedia_id=self.wemedia_id, tname=self.tname)
         self.path = path
@@ -353,6 +366,18 @@ class NeteaseWeb:
                     break
         return None
 
+    def article_detail(self, article_id: str) -> dict | None:
+        """Read the creator editor's per-ID post, including offline state 7."""
+        self.account()
+        payload = self._checked(self.http.json(
+            'GET', MP + '/wemedia/article/editpage.do',
+            params={'postId': article_id, 'wemediaId': self.wemedia_id,
+                    'mediaId': self.wemedia_id},
+            headers={'Referer': MP + '/wemedia/index.html'}), what='单篇详情')
+        data = payload.get('data')
+        post = data.get('post') if isinstance(data, dict) else None
+        return post if isinstance(post, dict) else None
+
     def verify(self, article_id: str, *, expected=None, evidence=None):
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', article_id):
             raise ValueError('网易文章 ID 无效')
@@ -362,8 +387,17 @@ class NeteaseWeb:
             proof.update(content_fingerprint(PLATFORM, expected.title, strip_markdown_images(expected.body)))
         item = self._find(article_id)
         if not item:
+            detail = self.article_detail(article_id)
+            if (isinstance(detail, dict) and detail.get('docid') == article_id
+                    and detail.get('wemediaId') == self.wemedia_id
+                    and str(detail.get('postState')) in ('6', '7')):
+                return PublishResult('deleted', f'网易单篇详情状态码 {detail["postState"]}，文章已下线或删除；公开链接已失效',
+                                     platform=PLATFORM, verification='verified')
             return PublishResult('pending', '网易列表未找到该文章，不会重发', platform=PLATFORM, verification='unavailable')
         state = _content_state(item)
+        if state == 'deleted':
+            return PublishResult('deleted', '网易作品列表显示文章已下线或删除；公开链接已失效',
+                                 platform=PLATFORM, verification='verified')
         if state == 'draft':
             return PublishResult('draft', f'网易草稿 {article_id} 已保存',
                                  f'https://mp.163.com/subscribe_v4/index.html#/article-publish/{article_id}',

@@ -5,9 +5,8 @@
 无头 Chromium：自动填网易 URS 手机号 + 密码并提交，成功后导出会话 Cookie 到
 持久化凭证，随后立即关闭浏览器（finally 兜底）。平时后台零进程、零内存。
 
-安全：账号密码只从环境变量（NETEASE_PHONE / NETEASE_PASS）或 --phone/--password/
-交互输入读取一次，绝不写入代码、仓库、日志或输出；落盘的是登录后的会话 Cookie
-与账号 id，不是明文密码。之后 account()/draft() 走 HTTP；发布走浏览器路径。
+账号密码由 CLI 保存在项目本地权限为 600 的独立登录信息文件，供凭证失效时续期；
+浏览器会话文件只保存 Cookie 与账号 id。之后 account()/draft() 走 HTTP；发布走浏览器路径。
 """
 from __future__ import annotations
 
@@ -41,7 +40,7 @@ class NeteaseLogin:
     # ─────────────────────────────────────────────
 
     def _export(self, context) -> None:
-        """把浏览器会话 Cookie 规约为凭证文件（账号密码不落盘）。"""
+        """把浏览器会话 Cookie 规约为凭证文件。"""
         from mulpubcli.http import add_cookies, save_session
         from .client import USER_AGENT
         import requests
@@ -55,10 +54,27 @@ class NeteaseLogin:
         save_session(self.destination, session, user_agent=USER_AGENT,
                      network='direct', account_id=self.account_id)
 
+    def _capture_after_login(self, page) -> None:
+        """Wait for login redirects to finish setting related 163.com cookies."""
+        previous = None
+        stable = 0
+        for _ in range(24):
+            cookies = page.context.cookies()
+            marker = tuple(sorted((c.get('domain'), c.get('name'), c.get('value'))
+                                  for c in cookies if _allowed(c.get('domain', ''))))
+            authenticated = any(c.get('name') == 'NTESwebSI' and c.get('value')
+                                for c in cookies)
+            stable = stable + 1 if marker == previous else 0
+            if authenticated and stable >= 4:
+                break
+            previous = marker
+            page.wait_for_timeout(250)
+        self._export(page.context)
+
     def _perform(self, page, browser, ctx) -> bool:
         """自动完成 URS 手机密码登录；返回 True=需要真人环节，False=已完成。"""
         if 'login.html' not in page.url:
-            self._export(page.context)
+            self._capture_after_login(page)
             return False
         # URS iframe 往往晚于顶层 DOM 出现，等它实际载入。
         frame_deadline = time.monotonic() + 10
@@ -66,7 +82,7 @@ class NeteaseLogin:
         while urs is None and time.monotonic() < frame_deadline:
             page.wait_for_timeout(100)
             if 'login.html' not in page.url:
-                self._export(page.context)
+                self._capture_after_login(page)
                 return False
             urs = next((f for f in page.frames if _URS in f.url), None)
         if urs is None:
@@ -96,7 +112,7 @@ class NeteaseLogin:
         deadline = time.monotonic() + 40
         while time.monotonic() < deadline:
             if 'login.html' not in page.url:
-                self._export(page.context)
+                self._capture_after_login(page)
                 return False
             try:
                 yidun = urs.eval_on_selector_all(

@@ -51,7 +51,9 @@ mulpubcli login <platform> [--method qr|sms] [--refresh] [--poll|--confirm|--coo
 
 知乎使用真实浏览器取得扫码地址，再生成独立的高清二维码 PNG；扫码状态由登录页自行查询，CLI 只监听页面响应，不另发查询请求。小红书和头条使用各自的二维码接口。三者最终都把可发布凭证保存在 `.storage/auth/<platform>.json`。
 
-网易号和搜狐号使用按需启动的浏览器登录。已有凭证经实时核验有效时，`login` 会直接返回账号 ID、名称和凭证路径，不再提示输入账号密码；`--refresh` 才强制重新登录。搜狐打开文章编辑页后若进入 `/clientAuth`，会在浏览器里点击“获取验证码”，确认发送接口成功后才提示输入短信。若搜狐先要求页面滑块，命令会临时提供一个仅监听 `127.0.0.1` 的小窗口地址；窗口显示原浏览器的验证码区域，并把拖动动作传回原会话。滑块窗口最多等待 2 分钟；短信验证码若接口未提供有效期，也最多等待 2 分钟（可用 `SOHU_SMS_CODE_TTL_SECONDS` 调整）。到期后登录结束。窗口只在验证期间运行，不复制 Cookie，不启动第二个浏览器。新凭证通过编辑页和账号接口核验后才替换原凭证。
+网易号和搜狐号使用按需启动的浏览器登录。已有凭证经实时核验有效时，`login` 会直接返回账号 ID、名称和凭证路径，不再提示输入账号密码；`--refresh` 才强制重新登录。一次账号密码登录成功后，工具将手机号和密码保存在 `.storage/auth/<platform>-login.json`（权限 600），与 Cookie 凭证文件分开。后续执行需要登录态的命令时，若账号接口明确确认凭证失效，会用保存的信息自动重新登录、核验仍是原账号，然后继续原操作。也可用 `NETEASE_PHONE` / `NETEASE_PASS` 或 `SOHU_PHONE` / `SOHU_PASSWORD` 提供续期信息。已有安装若只有 Cookie 而没有保存的账号密码，需要先执行一次 `login netease --refresh` 或 `login sohu --refresh`。网络故障不会触发重新登录；提交结果不明时也不会自动重发。
+
+网易号登录会在浏览器跳转完成后收集 `163.com` 及其子域名的 Cookie，并在 HTTP 核验后保留它们。搜狐打开文章编辑页后若进入 `/clientAuth`，会在浏览器里点击“获取验证码”，确认发送接口成功后才提示输入短信。若搜狐先要求页面滑块，命令会临时提供一个仅监听 `127.0.0.1` 的小窗口地址；窗口显示原浏览器的验证码区域，并把拖动动作传回原会话。滑块窗口最多等待 2 分钟；短信验证码若接口未提供有效期，也最多等待 2 分钟（可用 `SOHU_SMS_CODE_TTL_SECONDS` 调整）。到期后登录结束。窗口只在验证期间运行，不复制 Cookie，不启动第二个浏览器。新凭证通过编辑页和账号接口核验后才替换原凭证。
 
 远程服务器上可在自己电脑另开 SSH 隧道，端口取命令输出的小窗口地址中的端口，然后在本机浏览器打开该地址：
 
@@ -95,7 +97,7 @@ mulpubcli login xiaohongshu --method sms --confirm  # 输入验证码完成登�
 | `--method sms` | 短信登录（仅小红书） |
 | `--poll` | 兼容旧流程：对小红书或头条的已有二维码只检查一次 |
 | `--confirm` | 输入短信验证码确认（仅 `--method sms`） |
-| `--refresh` | 忽略现有登录态，重新登录 |
+| `--refresh` | 忽略现有登录态，重新登录；网易号和搜狐号成功后会保存续期用的手机号和密码 |
 | `--show-browser` | 搜狐登录显示浏览器窗口以完成人工页面验证，需要图形显示 |
 | `--cookie-file FILE` | 保留参数；当前实现尚未读取该文件，不能用于导入网易号登录态 |
 
@@ -109,7 +111,7 @@ mulpubcli login xiaohongshu --method sms --confirm  # 输入验证码完成登�
 | `expired` | 二维码/登录态已过期 |
 | `error` | 发生错误，message 字段有详情 |
 
-登录完成结果包含 `account_id`、`username`、`expires_at` 和 `cookie_expirations`。`cookie_expirations` 记录各 Cookie 实际提供的到期时间；`expires_at` 是已知登录 Cookie 中最早的到期时间。会话 Cookie 或平台未提供到期属性时为 `null`，不会推测一年等固定期限。这些时间不保证平台不会提前撤销登录态，`session` 命令仍会联网核验。凭证保存在 `.storage/auth/<platform>.json`（权限 600）；输出不会包含 Cookie 值。
+登录完成结果包含 `account_id`、`username`、`expires_at` 和 `cookie_expirations`。`cookie_expirations` 记录各 Cookie 实际提供的到期时间；`expires_at` 是已知登录 Cookie 中最早的到期时间。会话 Cookie 或平台未提供到期属性时为 `null`，不会推测一年等固定期限。这些时间不保证平台不会提前撤销登录态，`session` 命令仍会联网核验。Cookie 凭证保存在 `.storage/auth/<platform>.json`（权限 600）；输出不会包含 Cookie 值或密码。
 
 知乎登录页会自行刷新失效的二维码，CLI 同步更新独立的二维码图片。扫码等待从首次提供二维码起最多持续 2 分钟；自动换码不会延长这个时间。到期后输出 `expired` 并删除旧图片，重新执行 `login zhihu` 可获取新码。
 
@@ -144,7 +146,7 @@ mulpubcli session zhihu    # 只看知乎
 mulpubcli reset <platform>
 ```
 
-删除指定平台的登录凭证和二维码；知乎还会清理自己的浏览器配置，小红书会清理待扫码及短信登录会话。下一次 `login` 从头开始，适合清理卡死状态或切换账号。
+删除指定平台的登录凭证和二维码；网易号和搜狐号还会删除保存的手机号与密码，知乎会清理自己的浏览器配置，小红书会清理待扫码及短信登录会话。下一次 `login` 从头开始，适合清理卡死状态或切换账号。
 
 ```bash
 mulpubcli reset zhihu
@@ -155,16 +157,17 @@ mulpubcli reset zhihu
 ## publish — 发布文章
 
 ```
-mulpubcli publish <platform> --article FILE [--force] [--declaration VALUE]
+mulpubcli publish <platform> --article FILE [--declaration VALUE]
 ```
 
 直接提交公开投稿请求。平台可能需要审核，提交成功不等于已经公开可见。包含以下步骤：
-1. 检查本地幂等账本，24 小时内相同内容不重复提交
-2. 验证账号登录态
-3. 上传封面图
-4. 上传正文中引用的所有本地图片
-5. 提交文章
-6. 用 `verify` 回读平台状态
+1. 验证账号登录态
+2. 上传封面图
+3. 上传正文中引用的所有本地图片
+4. 提交文章
+5. 用 `verify` 回读平台状态
+
+本地不再按已有发布记录或过去 24 小时的提交次数拦截请求；每次调用都会发起新的平台提交，并分别保留本地记录。
 
 封面在稿件内用 `<!-- cover: 路径 -->` 指令指定（详见 [docs/publishing.md](publishing.md)），不再需要单独的 `--cover` 参数。
 
@@ -180,7 +183,6 @@ mulpubcli publish sohu --article article.md --declaration fiction
 | 选项 | 说明 |
 |------|------|
 | `--article FILE` | Markdown 稿件路径（第一行为 `# 标题`，封面用 `<!-- cover: 路径 -->` 指令） |
-| `--force` | 强制发送：跳过本地 24 小时去重与 pending 记录拦截，另建一次投稿记录；先前成功发布的状态和链接会保留 |
 | `--declaration` | 仅搜狐：`none`（无需声明，默认）、`fiction`（虚构演绎）、`ai`（AI 生成）、`marketing`（营销）、`reprint`（转载）、`opinion`（个人观点） |
 
 搜狐 `publish` 直接请求当前编辑器使用的图文公开投稿接口，不经草稿接口。搜狐账号无图文发布资格时，平台会拒绝投稿；CLI 会保留拒绝原因。本轮只验证了接口结构和只读列表，没有执行真实公开投稿。
@@ -192,9 +194,8 @@ mulpubcli publish sohu --article article.md --declaration fiction
 | status | 含义 |
 |--------|------|
 | `published` | 平台回读确认已发布，`url` 字段含公开链接 |
-| `pending` | 已提交但尚未核验（可能在审核中），不会重发 |
+| `pending` | 已提交但尚未核验（可能在审核中）；工具不会自动重试 |
 | `failed` | 投稿前失败或被平台明确拒绝，原因见 `message` |
-| `skipped` | 本地已有记录，跳过不重发 |
 
 → 详见 [docs/publishing.md](publishing.md)
 
@@ -203,7 +204,7 @@ mulpubcli publish sohu --article article.md --declaration fiction
 ## draft — 保存草稿
 
 ```
-mulpubcli draft <platform> --article FILE [--force]
+mulpubcli draft <platform> --article FILE
 ```
 
 支持 `zhihu`、`toutiao` 和 `netease`。流程与 publish 相同，但结果为草稿（不公开发布）。搜狐使用 `publish sohu` 直接投稿。
@@ -245,7 +246,7 @@ mulpubcli list-delete ID [ID ...]
 mulpubcli list-delete 2089828867179536901 toutiao-59399ec9c0373dce1a6b
 ```
 
-取消跟踪只让记录退出 `list` 和批量 `verify`，不会删除平台文章。原发布账本仍保留用于防止重复投稿，`status` 仍可查看它。之后用 `--force` 再次提交相同稿件会重新跟踪新提交。
+取消跟踪只让记录退出 `list` 和批量 `verify`，不会删除平台文章，`status` 仍可查看历史记录。之后再次提交相同稿件会创建并跟踪新的提交记录。
 
 ---
 
@@ -259,6 +260,8 @@ mulpubcli verify [--id ID] [--platform <platform>] [--article FILE] [--json]
 
 - **`--id ID`**：查单篇。已保存的 ID 从本地记录识别平台；没有记录时按 ID 形态尝试候选平台，也可用 `--platform` 明确指定。可选 `--article` 对照原稿核验。
 - **`--platform <platform>`**（或省略全部参数）：刷新本工具正在跟踪的文章，对已保存且有文章 ID 的项目逐篇回读，显示每篇状态、链接和核验说明。只凭列表缺席或临时接口错误不会认定文章已删除，也不会删除本地记录。
+
+回查确认文章已删除或下线时，状态为 `deleted`，公开链接会清空，但跟踪记录仍保留，只有 `list-delete` 才会取消跟踪。小红书要求完整作品列表无该笔记，且单篇详情明确返回 `-9106`（该笔记已被删除）；搜狐号使用单篇状态码 7；网易号使用单篇 `postState=7`；今日头条要求详情状态码 4 且删除原因为 `pgc_delete`；知乎要求公开文章与当前账号草稿接口均返回 404（也可能是平台下架）。接口返回 401 时显示 `unreachable`，不会根据列表缺席猜测已删除。
 
 ```bash
 mulpubcli verify --id 7385929102934                  # 回查单篇，自动识别平台
