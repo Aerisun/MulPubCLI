@@ -24,6 +24,25 @@ HOSTS = {'mp.163.com', 'www.163.com'}
 USER_AGENT = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
               '(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36')
 SESSION_COOKIE = 'NTESwebSI'
+DAILY_QUOTA_MESSAGE = '网易今日发布数量已达最大值（每日 6 篇），请明日再试'
+
+
+def daily_quota_reason(account: dict) -> str | None:
+    details = account.get('account_details')
+    if not isinstance(details, dict):
+        return None
+    published = details.get('today_published')
+    limit = details.get('daily_publish_limit')
+    if type(published) is int and type(limit) is int and limit > 0 and published >= limit:
+        return f'网易今日已发布 {published} 篇，达到每日 {limit} 篇上限，请明日再试'
+    return None
+
+
+def is_daily_quota_rejection(message: str) -> bool:
+    return any(marker in message for marker in (
+        '今日发布数量已达最大值', '今日发布数量已达上限',
+        '今日发文数量已达上限', '已达每日发布上限',
+    ))
 
 # attachment URL host 由 picupload 返回，供存储/回读做兜底（不是网络目标）。
 _ATTACH_HOST = '.ws.126.net'
@@ -163,6 +182,8 @@ class NeteaseWeb:
         code = int(code)
         if code not in expect_code:
             msg = payload.get('msg') or payload.get('message') or ''
+            if what == '投稿' and is_daily_quota_rejection(str(msg)):
+                raise HTTPFailure(DAILY_QUOTA_MESSAGE, kind='limit', code=code)
             kind = 'authentication_required' if code in (401, 8, 9, 70) else 'platform_rejected'
             raise HTTPFailure(f'网易{what}被拒绝（code={code}' + (f'，{msg}' if msg else '') + '），已停止', kind=kind, code=code)
         return payload
@@ -233,7 +254,11 @@ class NeteaseWeb:
     def _submit(self, article: Article, *, operation: str, urs_token: str = '',
                 checkpoint=None) -> dict:
         """上传配图并调用 publishV2.do；operation=saveDraft 或 publish。"""
-        self.account()
+        account = self.account()
+        if operation == 'publish':
+            reason = daily_quota_reason(account)
+            if reason:
+                raise HTTPFailure(reason, kind='limit')
         cover = self.upload_image(article.cover)
         if checkpoint:
             checkpoint('uploaded', cover['url'])
@@ -286,7 +311,8 @@ class NeteaseWeb:
         try:
             result = self._submit(article, operation='publish', urs_token=token, checkpoint=checkpoint)
         except HTTPFailure as exc:
-            return PublishResult('pending', f'网易发布阶段停止：{exc}', platform=PLATFORM)
+            return PublishResult('failed' if exc.kind == 'limit' else 'pending',
+                                 f'网易发布阶段停止：{exc}', platform=PLATFORM)
         except Exception as exc:
             return PublishResult('pending', f'网易发布阶段停止：{type(exc).__name__}；先核验发布记录', platform=PLATFORM)
         if checkpoint:

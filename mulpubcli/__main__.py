@@ -1326,7 +1326,7 @@ def _netease_browser_publish(article: Article, store: StorageLayout) -> PublishR
     try:
         result = pb.run(headless=True)
     except HTTPFailure as exc:
-        status = "failed" if exc.kind == "validation" else "pending"
+        status = "failed" if exc.kind in ("validation", "limit") else "pending"
         return PublishResult(status, f"网易浏览器发布停止：{exc}", platform="netease")
     except Exception as exc:
         return PublishResult("pending", f"网易浏览器发布异常：{type(exc).__name__}；先核验发布记录",
@@ -1367,6 +1367,13 @@ def _do_publish(platform: str, article: Article, store: StorageLayout, draft: bo
             return client.draft(article, checkpoint=checkpoint)
         if platform == "netease":
             # 公开发布要走真实编辑器的受保护提交（瞬时浏览器），纯 HTTP 直发会被风控受限。
+            from .platforms.netease.client import daily_quota_reason
+            try:
+                quota_reason = daily_quota_reason(client.account())
+            except HTTPFailure:
+                quota_reason = None  # 登录态等异常仍由原发布流程处理。
+            if quota_reason:
+                return PublishResult('failed', quota_reason, platform='netease')
             return _netease_browser_publish(article, store)
         return client.publish(article, checkpoint=checkpoint)
     finally:
