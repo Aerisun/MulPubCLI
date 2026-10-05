@@ -57,17 +57,37 @@ class NeteaseLogin:
 
     def _perform(self, page, browser, ctx) -> bool:
         """自动完成 URS 手机密码登录；返回 True=需要真人环节，False=已完成。"""
-        if 'login.html' not in page.url:
-            self._export(page.context)
+        from .client import SESSION_COOKIE
+
+        def has_authenticated_cookies() -> bool:
+            required = {SESSION_COOKIE, 'P_INFO', 'S_INFO'}
+            valid_names = set()
+            for cookie in ctx.cookies():
+                name = cookie.get('name')
+                if name not in required or not cookie.get('value'):
+                    continue
+                expires = cookie.get('expires', -1)
+                if (
+                    not isinstance(expires, (int, float))
+                    or expires < 0
+                    or expires > time.time()
+                ):
+                    valid_names.add(name)
+            return required.issubset(valid_names)
+
+        def export_if_authenticated() -> bool:
+            if not has_authenticated_cookies():
+                return False
+            self._export(ctx)
+            return True
+
+        if export_if_authenticated():
             return False
         # URS iframe 往往晚于顶层 DOM 出现，等它实际载入。
         frame_deadline = time.monotonic() + 10
         urs = next((f for f in page.frames if _URS in f.url), None)
         while urs is None and time.monotonic() < frame_deadline:
             page.wait_for_timeout(100)
-            if 'login.html' not in page.url:
-                self._export(page.context)
-                return False
             urs = next((f for f in page.frames if _URS in f.url), None)
         if urs is None:
             return True
@@ -89,15 +109,14 @@ class NeteaseLogin:
                     " if(c && !c.checked) c.click(); return c?c.checked:null}")
             except Exception:
                 pass
+            page_url_before_submit = page.url
+            urs_url_before_submit = urs.url
             urs.click(".u-loginbtn", timeout=4000)
         except Exception:
             return True   # 提交未完成，交由等待/重试路径
         # 以实际跳转或验证控件为完成信号；短间隔仅用于检测跨域 iframe 状态。
         deadline = time.monotonic() + 40
         while time.monotonic() < deadline:
-            if 'login.html' not in page.url:
-                self._export(page.context)
-                return False
             try:
                 yidun = urs.eval_on_selector_all(
                     ".yidun,.yidun_panel,iframe[src*=dun]", "e=>e.length")
@@ -105,6 +124,11 @@ class NeteaseLogin:
                 yidun = 0
             if yidun:
                 return True
+            if has_authenticated_cookies() and (
+                page.url != page_url_before_submit or urs.url != urs_url_before_submit
+            ):
+                self._export(ctx)
+                return False
             page.wait_for_timeout(250)
         return True
 
