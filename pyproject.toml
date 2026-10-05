@@ -17,6 +17,7 @@ dependencies = [
     "python-dotenv",
     "PyExecJS",
     "playwright>=1.45",
+    "websockets>=17,<18",
 ]
 
 [project.scripts]

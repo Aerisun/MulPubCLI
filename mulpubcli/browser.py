@@ -69,9 +69,11 @@ class PlaywrightLoginer:
 
     def __init__(self, *, user_agent: str = DEFAULT_UA,
                  storage_state_dir: Path | None = None,
-                 profile_name: str = 'sohu-profile',
+                 profile_name: str | None = 'sohu-profile',
                  proxy: dict | str | None = None):
-        if not profile_name or profile_name in ('.', '..') or '/' in profile_name or '\\' in profile_name:
+        if profile_name is not None and (
+                not profile_name or profile_name in ('.', '..')
+                or '/' in profile_name or '\\' in profile_name):
             raise ValueError('浏览器配置目录名无效')
         self.user_agent = user_agent
         self.storage_state_dir = storage_state_dir
@@ -84,7 +86,7 @@ class PlaywrightLoginer:
         self._pw = None
 
     def _setup_profile(self) -> str | None:
-        if not self.storage_state_dir:
+        if not self.storage_state_dir or self.profile_name is None:
             return None
         self.storage_state_dir.mkdir(parents=True, exist_ok=True)
         # 持久化 user-data 目录：复用同一设备指纹（preview-dv-id），已授权设备不重复验证。

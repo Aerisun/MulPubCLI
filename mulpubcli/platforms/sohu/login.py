@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import os
+import re
+import select
 import sys
 import tempfile
+import termios
 import time
 from pathlib import Path
 
@@ -13,11 +16,51 @@ from mulpubcli.http import HTTPFailure, save_session
 
 LOGIN_URL = 'https://v4.passport.sohu.com/fe/login?appid=999801&p=password'
 EDITOR_URL = MP + '/mpfe/v4/contentManagement/news/addarticle?contentStatus=2'
+
+
+def _read_tty_code_until(prompt: str, deadline: float) -> str:
+    """Read one hidden line without blocking past SMS expiry."""
+    fd = sys.stdin.fileno()
+    original = termios.tcgetattr(fd)
+    hidden = termios.tcgetattr(fd)
+    hidden[3] &= ~termios.ECHO
+    termios.tcsetattr(fd, termios.TCSADRAIN, hidden)
+    print(prompt, end='', file=sys.stderr, flush=True)
+    try:
+        remaining = max(0.0, deadline - time.monotonic())
+        if not select.select([fd], [], [], remaining)[0]:
+            termios.tcflush(fd, termios.TCIFLUSH)
+            return ''
+        code = sys.stdin.readline().strip()
+        return code if time.monotonic() < deadline else ''
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, original)
+        print(file=sys.stderr, flush=True)
+
+
+def _sms_valid_seconds(payload: dict, fallback: int) -> int:
+    """Use an explicit server TTL when supplied; otherwise use the local cap."""
+    sources = [payload, payload.get('data')]
+    duration_keys = ('expiresIn', 'expireIn', 'ttlSeconds', 'validSeconds',
+                     'expireSeconds', 'codeExpireSeconds', 'smsExpireSeconds')
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in duration_keys:
+            try:
+                value = float(source[key])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if 0 <= value <= 1800:
+                return int(value)
+    return fallback
+
+
 class SohuLogin:
     """驱动一次搜狐登录并导出凭证到持久化文件。"""
 
     def __init__(self, phone: str, password: str, destination: Path,
-                 *, account_id: str = ''):
+                 *, account_id: str = '', on_challenge=None, mirror_port: int = 0):
         if not isinstance(phone, str) or not isinstance(password, str):
             raise ValueError('搜狐手机号与密码须为字符串')
         if '\r' in phone or '\n' in phone or '\r' in password or '\n' in password:
@@ -27,47 +70,110 @@ class SohuLogin:
         self.destination = destination
         self.account_id = account_id
         self.dv_id = ''
+        self._headless = True
+        self.on_challenge = on_challenge
+        self.mirror_port = mirror_port
 
-    def _solve_sms_code(self, page, code_timeout_s: int = 240) -> bool:
+    def _mirror_ready(self, url: str) -> None:
+        """Expose an embeddable URL without handing out cookies or a second session."""
+        if self.on_challenge is not None:
+            self.on_challenge(url)
+            return
+        print(f'[搜狐] 请打开窗口并通过临时滑块窗口：[{url}]({url})',
+              file=sys.stderr, flush=True)
+
+    def _solve_sms_code(self, page, code_timeout_s: int | None = None) -> bool:
         """等用户输入短信验证码并提交。找不到输入框则跳过。
 
-        优先从终端 getpass 读；非 tty / 无人值守（由外部网页服务或上层托管）时，
+        优先从终端限时读取；非 tty / 无人值守（由外部网页服务或上层托管）时，
         轮询临时文件 code_file（换行分隔每位或整串）读取。——文件由调用方或用户写入。
         """
+        code_input = page.locator("input[placeholder='请输入短信验证码']")
+        if code_input.count() != 1:
+            raise HTTPFailure('搜狐短信授权页没有验证码输入框', kind='verification_required')
+        # 只有发送接口明确接受请求，才提示用户输入短信。
+        send_button = page.get_by_role('button', name='获取验证码', exact=True)
+        from playwright.sync_api import TimeoutError as PWTimeout
         try:
-            code_input = page.locator("input[type=text]").last
-            if code_input.count() == 0:
-                return False
-        except Exception:
-            return False
-        # 1) 点"获取验证码"把短信发出去（clientAuth 页按钮文本即"获取验证码"）。
-        for sel in ("text=获取验证码", "button:has-text('获取验证码')",
-                    "text=重新获取", "text=获取验证码?", "text=获取"):
+            with page.expect_response(
+                    lambda response: '/account/cv/send-sms-v2' in response.url,
+                    timeout=15_000) as sent:
+                send_button.click(timeout=5000)
+            response = sent.value
+        except PWTimeout:
+            raise HTTPFailure('搜狐未确认短信验证码发送，登录已停止',
+                              kind='verification_required') from None
+        try:
+            payload = response.json()
+        except ValueError:
+            raise HTTPFailure('搜狐短信发送接口未返回有效结果',
+                              kind='invalid_response') from None
+        code = payload.get('code') if isinstance(payload, dict) else None
+        if code == 9000000:
+            if self._headless:
+                from mulpubcli.browser_mirror import BrowserMirror
+                with BrowserMirror(port=self.mirror_port) as mirror:
+                    response = mirror.wait_for_sms_send(
+                        page, on_ready=self._mirror_ready)
+            else:
+                print('[搜狐] 页面要求验证码；请在浏览器里完成验证，必要时再次点击获取验证码。',
+                      file=sys.stderr, flush=True)
+                deadline = time.monotonic() + 120
+                while time.monotonic() < deadline:
+                    remaining = max(1, int((deadline - time.monotonic()) * 1000))
+                    try:
+                        response = page.wait_for_event(
+                            'response',
+                            predicate=lambda item: '/account/cv/send-sms-v2' in item.url,
+                            timeout=min(10_000, remaining))
+                    except PWTimeout:
+                        continue
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        continue
+                    code = payload.get('code') if isinstance(payload, dict) else None
+                    if response.ok and code in (0, 200, 2000000):
+                        break
+                    if code != 9000000:
+                        raise HTTPFailure(f'搜狐短信发送未成功（code={code}），登录已停止',
+                                          kind='verification_required')
+                else:
+                    raise HTTPFailure('等待搜狐页面验证与短信发送超时，登录未完成',
+                                      kind='verification_required')
+            payload = response.json()
+            code = payload.get('code') if isinstance(payload, dict) else None
+        if not response.ok or code not in (0, 200, 2000000):
+            raise HTTPFailure(f'搜狐短信发送未成功（code={code}），登录已停止',
+                              kind='verification_required')
+        if code_timeout_s is None:
             try:
-                loc = page.locator(sel).first
-                if loc.count() > 0 and loc.is_visible():
-                    loc.click(timeout=5000)
-                    break
-            except Exception:
-                continue
-        # 2) 读短信验证码（终端 getpass 优先，非 tty 直接回退到临时文件轮询）。
+                code_timeout_s = int(os.environ.get('SOHU_SMS_CODE_TTL_SECONDS', '120'))
+            except ValueError:
+                code_timeout_s = 120
+        code_timeout_s = _sms_valid_seconds(
+            payload, min(max(0, code_timeout_s), 1800))
+        deadline = time.monotonic() + code_timeout_s
+        sent_at_wall = time.time()
+        print(f'[搜狐] 短信发送接口已确认，等待验证码（最多 {code_timeout_s} 秒）…',
+              file=sys.stderr, flush=True)
+        # 2) 限时读取短信验证码；非 tty 回退到临时文件轮询。
         code_file = Path(self.destination.parent) / '.dev' / 'sohu_sms_code.txt'
         code = ''
         if sys.stdin.isatty():
             try:
-                import getpass
-                code = getpass.getpass('请输入搜狐短信验证码（6 位，不回显）: ').strip()
-            except (EOFError, KeyboardInterrupt, OSError):
+                code = _read_tty_code_until(
+                    '请输入搜狐短信验证码（6 位，不回显）: ', deadline)
+            except (EOFError, OSError, termios.error):
                 code = ''
-        if not code:
+        if not code and time.monotonic() < deadline:
             code_file.parent.mkdir(parents=True, exist_ok=True)
-            print(f'[搜狐] 等待短信验证码… 将 6 位验证码写入 {code_file}（最多等 {code_timeout_s}s）',
+            print(f'[搜狐] 等待短信验证码… 将 6 位验证码写入 {code_file}',
                   file=sys.stderr, flush=True)
-            deadline = time.time() + code_timeout_s
             last = None
-            while time.time() < deadline and not code:
+            while time.monotonic() < deadline and not code:
                 try:
-                    if code_file.exists():
+                    if code_file.exists() and code_file.stat().st_mtime >= sent_at_wall - 1:
                         cur = code_file.read_text(encoding='utf-8').strip()
                     else:
                         cur = ''
@@ -76,31 +182,27 @@ class SohuLogin:
                 if cur and cur != last:
                     code = ''.join(ch for ch in cur if ch.isdigit())
                 last = cur
-                time.sleep(1)
+                time.sleep(min(1, max(0, deadline - time.monotonic())))
             if code and code_file.exists():
                 try:
                     code_file.unlink()
                 except Exception:
                     pass
         if not code:
-            print('[搜狐] 未收到短信验证码，跳过短信提交。', file=sys.stderr, flush=True)
-            return False
+            raise HTTPFailure('搜狐短信验证码等待到期，登录已结束',
+                              kind='verification_required')
+        if not re.fullmatch(r'\d{6}', code):
+            raise HTTPFailure('搜狐短信验证码须为 6 位数字', kind='verification_required')
         try:
             code_input.fill(code)
         except Exception:
             return False
-        # 点"提交/确定"按钮。
-        for i in range(page.locator('button').count()):
-            try:
-                text = page.locator('button').nth(i).inner_text() or ''
-            except Exception:
-                continue
-            if '提交' in text or '确定' in text or '确认' in text:
-                try:
-                    page.locator('button').nth(i).click(timeout=5000)
-                except Exception:
-                    pass
-                break
+        # 只点击短信授权表单的提交按钮；未提交不能报告成功。
+        try:
+            page.get_by_role('button', name='提交', exact=True).click(timeout=5000)
+        except PWTimeout:
+            raise HTTPFailure('搜狐短信验证码提交按钮不可用',
+                              kind='verification_required') from None
         try:
             page.wait_for_function(
                 "() => !location.href.includes('/clientAuth') || "
@@ -114,11 +216,12 @@ class SohuLogin:
     def _wait_for_editor_or_auth(page) -> None:
         """等后台编辑器或设备授权页实际出现，再判断下一步。"""
         page.wait_for_function(
-            "() => location.href.includes('/clientAuth') || "
+            "() => location.pathname.includes('/clientAuth') || "
             "(location.hostname === 'mp.sohu.com' && "
             "location.pathname.includes('/contentManagement/') && "
-            "document.readyState === 'complete')",
-            timeout=15_000)
+            "(document.querySelector('[contenteditable=true]') || "
+            "document.querySelector('input[placeholder*=标题]')))",
+            timeout=20_000)
 
     def _perform(self, page, browser, ctx):
         """执行登录自动化。返回 True 表示仍需外部帮助，False 表示已全部完成。"""
@@ -142,7 +245,8 @@ class SohuLogin:
             page.goto(EDITOR_URL, timeout=50000, wait_until='domcontentloaded')
             self._wait_for_editor_or_auth(page)
         except PWTimeout:
-            pass
+            raise HTTPFailure('搜狐文章编辑页或短信授权页未就绪，登录未完成',
+                              kind='verification_required') from None
 
         # 判断是否需真人授权：URL 停在 clientAuth 或页面含"短信验证"字样。
         try:
@@ -154,13 +258,19 @@ class SohuLogin:
 
         # 第二步：搜狐要求设备授权时，由终端输入短信验证码。
         if need_human:
-            self._solve_sms_code(page)
+            if not self._solve_sms_code(page):
+                raise HTTPFailure('搜狐需要短信授权，但验证码未完成',
+                                  kind='verification_required')
             # 短信通过后，回到编辑器；已授权设备不会再被拦。
             try:
                 page.goto(EDITOR_URL, timeout=50000, wait_until='domcontentloaded')
                 self._wait_for_editor_or_auth(page)
             except PWTimeout:
-                pass
+                raise HTTPFailure('搜狐短信提交后文章编辑页未就绪',
+                                  kind='verification_required') from None
+            if '/clientAuth' in (page.url or ''):
+                raise HTTPFailure('搜狐短信授权未通过，登录未完成',
+                                  kind='verification_required')
 
         # 暂存浏览器凭证；run() 会再用账号接口核验，通过才替换正式凭证。
         self._export(page)
@@ -206,9 +316,11 @@ class SohuLogin:
         staged = Path(name)
         staged.unlink()
         self.destination = staged
+        self._headless = headless
         try:
             loginer = PlaywrightLoginer(user_agent=USER_AGENT,
-                                        storage_state_dir=target.parent)
+                                        storage_state_dir=target.parent,
+                                        profile_name=None)
             result = loginer.login(LOGIN_URL, self._perform, headless=headless,
                                    wait_after_auto_ms=0)
             if result.status != 'ok':

@@ -1,20 +1,126 @@
 """搜狐登录须核验账号，并复用已验证的凭证。"""
 import json
+import os
+import termios
+import time
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
-from mulpubcli.__main__ import _sohu_login
+from mulpubcli.__main__ import _sohu_login, _build_parser
 from mulpubcli.browser import LoginResult
 from mulpubcli.http import HTTPFailure
 from mulpubcli.platforms.sohu.client import SohuWeb
-from mulpubcli.platforms.sohu.login import SohuLogin
+from mulpubcli.platforms.sohu.login import (
+    SohuLogin, _read_tty_code_until, _sms_valid_seconds)
 from mulpubcli.storage import StorageLayout
+from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
 
 class SohuLoginTests(unittest.TestCase):
+    def test_sms_validity_uses_server_ttl_or_two_minute_fallback(self):
+        self.assertEqual(_sms_valid_seconds({'data': {'expiresIn': 90}}, 120), 90)
+        self.assertEqual(_sms_valid_seconds({'data': {}}, 120), 120)
+
+    def test_sms_tty_input_times_out_and_restores_echo(self):
+        master, slave = os.openpty()
+        with os.fdopen(slave, 'r') as stream:
+            original = termios.tcgetattr(stream.fileno())
+            try:
+                with patch('sys.stdin', stream):
+                    code = _read_tty_code_until('验证码: ', time.monotonic() + .03)
+                self.assertEqual(code, '')
+                self.assertEqual(termios.tcgetattr(stream.fileno()), original)
+            finally:
+                os.close(master)
+
+    def test_sms_prompt_requires_confirmed_send_response(self):
+        with TemporaryDirectory() as root:
+            login = SohuLogin('phone', 'password', Path(root) / 'sohu.json')
+            page = Mock()
+            page.locator.return_value.last.count.return_value = 1
+            page.expect_response.side_effect = PlaywrightTimeout('send timeout')
+            with patch('sys.stdin.isatty', return_value=False):
+                with self.assertRaises(HTTPFailure):
+                    login._solve_sms_code(page, code_timeout_s=0)
+
+    def test_sms_challenge_reports_unsent_without_exposing_challenge_data(self):
+        with TemporaryDirectory() as root:
+            login = SohuLogin('phone', 'password', Path(root) / 'sohu.json')
+            page = Mock()
+            page.locator.return_value.count.return_value = 1
+            response = Mock(ok=True)
+            response.json.return_value = {'code': 9000000, 'msg': 'opaque-challenge-token'}
+            page.expect_response.return_value = nullcontext(SimpleNamespace(value=response))
+            mirror = MagicMock()
+            mirror.__enter__.return_value = mirror
+            mirror.wait_for_sms_send.side_effect = HTTPFailure('页面验证码超时')
+            with patch('mulpubcli.browser_mirror.BrowserMirror', return_value=mirror):
+                with self.assertRaisesRegex(HTTPFailure, '页面验证码') as failure:
+                    login._solve_sms_code(page)
+            self.assertNotIn('opaque-challenge-token', str(failure.exception))
+
+    def test_visible_browser_waits_for_challenge_then_sms_send(self):
+        with TemporaryDirectory() as root:
+            login = SohuLogin('phone', 'password', Path(root) / 'sohu.json')
+            login._headless = False
+            page = Mock()
+            page.locator.return_value.count.return_value = 1
+            challenge = Mock(ok=True)
+            challenge.json.return_value = {'code': 9000000, 'msg': 'opaque'}
+            accepted = Mock(ok=True)
+            accepted.json.return_value = {'code': 2000000}
+            page.expect_response.return_value = nullcontext(SimpleNamespace(value=challenge))
+            page.wait_for_event.return_value = accepted
+            with patch('sys.stdin.isatty', return_value=True), \
+                 patch('mulpubcli.platforms.sohu.login._read_tty_code_until',
+                       return_value='123456'):
+                self.assertTrue(login._solve_sms_code(page))
+            page.wait_for_event.assert_called_once()
+            page.get_by_role.assert_any_call('button', name='提交', exact=True)
+
+    def test_headless_challenge_uses_temporary_browser_mirror(self):
+        with TemporaryDirectory() as root:
+            on_challenge = Mock()
+            login = SohuLogin('phone', 'password', Path(root) / 'sohu.json',
+                              on_challenge=on_challenge)
+            page = Mock()
+            page.locator.return_value.count.return_value = 1
+            challenge = Mock(ok=True)
+            challenge.json.return_value = {'code': 9000000, 'msg': 'opaque'}
+            accepted = Mock(ok=True)
+            accepted.json.return_value = {'code': 2000000}
+            page.expect_response.return_value = nullcontext(SimpleNamespace(value=challenge))
+            mirror = MagicMock()
+            mirror.__enter__.return_value = mirror
+            mirror.url = 'http://127.0.0.1:8765/t/test/'
+            mirror.wait_for_sms_send.side_effect = lambda page, on_ready: (
+                on_ready(mirror.url), accepted)[1]
+            with patch('mulpubcli.browser_mirror.BrowserMirror', return_value=mirror), \
+                 patch('sys.stdin.isatty', return_value=True), \
+                 patch('mulpubcli.platforms.sohu.login._read_tty_code_until',
+                       return_value='123456'):
+                self.assertTrue(login._solve_sms_code(page))
+            mirror.wait_for_sms_send.assert_called_once()
+            on_challenge.assert_called_once_with(mirror.url)
+
+    def test_cancelling_sms_prompt_stops_login_immediately(self):
+        with TemporaryDirectory() as root:
+            login = SohuLogin('phone', 'password', Path(root) / 'sohu.json')
+            page = Mock()
+            page.locator.return_value.count.return_value = 1
+            accepted = Mock(ok=True)
+            accepted.json.return_value = {'code': 2000000}
+            page.expect_response.return_value = nullcontext(SimpleNamespace(value=accepted))
+            with patch('sys.stdin.isatty', return_value=True), \
+                 patch('mulpubcli.platforms.sohu.login._read_tty_code_until',
+                       side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    login._solve_sms_code(page, code_timeout_s=0)
+
     def test_fast_path_does_not_add_long_fixed_sleeps(self):
         login = SohuLogin('phone', 'password', Path('/tmp/unused-sohu.json'))
         page = Mock()
@@ -25,6 +131,39 @@ class SohuLoginTests(unittest.TestCase):
         waits = [call.args[0] for call in page.wait_for_timeout.call_args_list]
         self.assertFalse(any(wait >= 4_000 for wait in waits))
         self.assertGreaterEqual(page.wait_for_function.call_count, 2)
+
+    def test_sms_challenge_cannot_be_reported_as_authenticated_when_unsolved(self):
+        login = SohuLogin('phone', 'password', Path('/tmp/unused-sohu.json'))
+        page = Mock()
+        page.url = 'https://mp.sohu.com/clientAuth'
+        page.evaluate.return_value = '短信验证'
+        with patch.object(login, '_solve_sms_code', return_value=False), \
+             patch.object(login, '_export') as export:
+            with self.assertRaises(HTTPFailure):
+                login._perform(page, None, None)
+        export.assert_not_called()
+
+    def test_waits_for_editor_application_before_deciding_no_sms(self):
+        login = SohuLogin('phone', 'password', Path('/tmp/unused-sohu.json'))
+        page = Mock()
+        page.url = 'https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle'
+        page.evaluate.side_effect = lambda script: '短信验证' if '/clientAuth' in page.url else ''
+
+        editor_checks = 0
+
+        def wait_for_page(predicate, **kwargs):
+            nonlocal editor_checks
+            if 'contenteditable' in predicate:
+                editor_checks += 1
+                page.url = ('https://mp.sohu.com/mpfe/v4/clientAuth'
+                            if editor_checks == 1 else
+                            'https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle')
+
+        page.wait_for_function.side_effect = wait_for_page
+        with patch.object(login, '_solve_sms_code', return_value=True) as sms, \
+             patch.object(login, '_export'):
+            login._perform(page, None, None)
+        sms.assert_called_once_with(page)
 
     def test_account_discovers_single_verified_identity(self):
         client = SohuWeb(account_id='')
@@ -109,6 +248,7 @@ class SohuLoginTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding='utf-8'), 'verified')
             client.close.assert_called_once()
             self.assertEqual(browser.return_value.login.call_args.kwargs['wait_after_auto_ms'], 0)
+            self.assertIsNone(browser.call_args.kwargs['profile_name'])
 
     def test_cli_reuses_valid_session_without_prompting(self):
         with TemporaryDirectory() as root:
@@ -139,6 +279,20 @@ class SohuLoginTests(unittest.TestCase):
             self.assertEqual(payload['status'], 'authenticated')
             self.assertEqual(payload['account_id'], '123')
             self.assertEqual(payload['username'], 'Alice')
+
+    def test_cli_can_show_browser_for_manual_page_challenge(self):
+        args = _build_parser().parse_args(['login', 'sohu', '--show-browser'])
+        with TemporaryDirectory() as root:
+            store = StorageLayout(Path(root))
+            args.refresh = True
+            args.phone = 'phone'
+            args.password = 'password'
+            with patch.dict('os.environ', {'DISPLAY': ':1'}), \
+                 patch('mulpubcli.platforms.sohu.login.SohuLogin.run',
+                       return_value={'status': 'failed', 'platform': 'sohu'}) as run, \
+                 patch('mulpubcli.__main__._out'):
+                _sohu_login(args, store)
+            run.assert_called_once_with(headless=False)
 
 
 if __name__ == '__main__':

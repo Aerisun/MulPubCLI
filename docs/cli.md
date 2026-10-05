@@ -51,7 +51,15 @@ mulpubcli login <platform> [--method qr|sms] [--refresh] [--poll|--confirm|--coo
 
 知乎使用真实浏览器取得扫码地址，再生成独立的高清二维码 PNG；扫码状态由登录页自行查询，CLI 只监听页面响应，不另发查询请求。小红书和头条使用各自的二维码接口。三者最终都把可发布凭证保存在 `.storage/auth/<platform>.json`。
 
-网易号和搜狐号使用按需启动的浏览器登录。已有凭证经实时核验有效时，`login` 会直接返回账号 ID、名称和凭证路径，不再提示输入账号密码；`--refresh` 才强制重新登录。搜狐需要设备授权时会在 `/clientAuth` 页提示输入短信验证码。这是登录后的设备授权，不是图文发布验证码；账号仍须具备图文发布资格。新凭证通过账号接口核验后才替换原凭证。
+网易号和搜狐号使用按需启动的浏览器登录。已有凭证经实时核验有效时，`login` 会直接返回账号 ID、名称和凭证路径，不再提示输入账号密码；`--refresh` 才强制重新登录。搜狐打开文章编辑页后若进入 `/clientAuth`，会在浏览器里点击“获取验证码”，确认发送接口成功后才提示输入短信。若搜狐先要求页面滑块，命令会临时提供一个仅监听 `127.0.0.1` 的小窗口地址；窗口显示原浏览器的验证码区域，并把拖动动作传回原会话。滑块窗口最多等待 2 分钟；短信验证码若接口未提供有效期，也最多等待 2 分钟（可用 `SOHU_SMS_CODE_TTL_SECONDS` 调整）。到期后登录结束。窗口只在验证期间运行，不复制 Cookie，不启动第二个浏览器。新凭证通过编辑页和账号接口核验后才替换原凭证。
+
+远程服务器上可在自己电脑另开 SSH 隧道，端口取命令输出的小窗口地址中的端口，然后在本机浏览器打开该地址：
+
+```bash
+ssh -N -L <端口>:127.0.0.1:<端口> <你的SSH地址>
+```
+
+大服务可创建 `SohuLogin(..., on_challenge=callback)`；回调收到临时本地 URL 后，通过大服务同源反向代理将其放进弹窗或 iframe。代理须同时转发该路径下的普通 HTTP 请求和 `ws` WebSocket 升级请求，保持路径后缀不变。窗口只含验证码图像，没有额外文字或按钮，背景透明且无边距；主服务可把 iframe 放在任意位置。验证码首次显示或尺寸变化时，窗口向同源父页面发送 `{type: 'mulpubcli:sohu:challenge-size', width, height}`，主服务可据此把 iframe 设为对应像素尺寸。短信发送成功时发送 `{type: 'mulpubcli:sohu:sms-sent'}`，主服务可关闭弹窗并显示短信输入框。URL 含一次性访问令牌，应只交给当前登录用户；验证码结束后本地服务即关闭。没有人打开窗口时不会持续截图。
 
 ```bash
 # 生成二维码并持续等待扫码确认
@@ -71,6 +79,7 @@ mulpubcli login sohu
 # 需要重新登录时
 mulpubcli login netease --refresh
 mulpubcli login sohu --refresh
+mulpubcli login sohu --refresh --show-browser  # 页面验证码需人工操作且有图形显示时
 
 # 小红书短信登录
 mulpubcli login xiaohongshu --method sms            # 输入手机号，发送验证码
@@ -87,6 +96,7 @@ mulpubcli login xiaohongshu --method sms --confirm  # 输入验证码完成登�
 | `--poll` | 兼容旧流程：对小红书或头条的已有二维码只检查一次 |
 | `--confirm` | 输入短信验证码确认（仅 `--method sms`） |
 | `--refresh` | 忽略现有登录态，重新登录 |
+| `--show-browser` | 搜狐登录显示浏览器窗口以完成人工页面验证，需要图形显示 |
 | `--cookie-file FILE` | 保留参数；当前实现尚未读取该文件，不能用于导入网易号登录态 |
 
 **输出状态说明：**

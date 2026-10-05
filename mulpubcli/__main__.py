@@ -507,6 +507,12 @@ def _sohu_login(args, store: StorageLayout) -> int:
             _out(probe)
             return 0
 
+    show_browser = bool(getattr(args, 'show_browser', False))
+    if show_browser and not (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')):
+        _out({'status': 'failed', 'platform': platform, 'kind': 'local_environment',
+              'message': '当前终端没有图形显示；请在可打开浏览器窗口的桌面或图形转发终端执行'})
+        return 1
+
     phone = getattr(args, "phone", None) or os.environ.get("SOHU_PHONE", "")
     password = getattr(args, "password", None) or os.environ.get("SOHU_PASSWORD", "")
     if not phone:
@@ -519,7 +525,7 @@ def _sohu_login(args, store: StorageLayout) -> int:
 
     try:
         print('[搜狐] 正在打开登录页并核验账号…', file=sys.stderr, flush=True)
-        result = SohuLogin(phone, password, cred_path).run(headless=True)
+        result = SohuLogin(phone, password, cred_path).run(headless=not show_browser)
         if result.get('status') == 'ok':
             _out(_login_result(platform, cred_path, info=result,
                                message=result.get('message', '搜狐浏览器登录成功')))
@@ -1733,6 +1739,8 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="登录手机号（网易用 NETEASE_PHONE、搜狐用 SOHU_PHONE；未提供则交互提示）")
     p_login.add_argument("--password", metavar="PASS",
                          help="登录密码（网易用 NETEASE_PASS、搜狐用 SOHU_PASSWORD；未提供则交互提示且不回显）")
+    p_login.add_argument("--show-browser", action="store_true",
+                         help="搜狐页面要求人工验证码时显示浏览器窗口（须有图形显示）")
 
     # session
     p_session = sub.add_parser("session", help="实时探测各平台登录态（联网核验凭证有效性）")
