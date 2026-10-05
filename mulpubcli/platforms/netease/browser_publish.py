@@ -26,6 +26,8 @@ from urllib.parse import parse_qsl
 
 from mulpubcli.http import HTTPFailure
 
+from .client import DAILY_QUOTA_MESSAGE, is_daily_quota_rejection
+
 _IMAGE_PASTE_JS = """({b64, name, mime_type}) => {
     const bin = atob(b64);
     const arr = new Uint8Array(bin.length);
@@ -326,6 +328,8 @@ class NeteaseBrowserPublish:
                 return None
             code = _publish_code(body)
             if code != 1:
+                if is_daily_quota_rejection(body):
+                    raise HTTPFailure(DAILY_QUOTA_MESSAGE, kind='limit', code=code)
                 raise HTTPFailure(f'网易发布被平台拒绝（code={code}）：{body[:200]}',
                                   kind='invalid_response')
             from .client import _doc_id
@@ -345,6 +349,8 @@ class NeteaseBrowserPublish:
             try:
                 page.click('button:has-text("发布")', timeout=8000)
             except Exception:
+                if self._quota_hit(page, checks=1):
+                    raise HTTPFailure(DAILY_QUOTA_MESSAGE, kind='limit')
                 return True   # 没点成，需要人工介入
         page.wait_for_timeout(1500)
         confirmed = accepted_response()
@@ -353,8 +359,7 @@ class NeteaseBrowserPublish:
         # 第一次点：等诊断/助手面板 settle；期间若弹出额度已满则明确报错而非空等。
         quota = self._quota_hit(page)
         if quota:
-            raise HTTPFailure('网易今日发布数量已达最大值（6/天），请明日再试',
-                              kind='limit')
+            raise HTTPFailure(DAILY_QUOTA_MESSAGE, kind='limit')
         page.wait_for_timeout(6000)
         confirmed = accepted_response()
         if confirmed is not None:
@@ -369,15 +374,21 @@ class NeteaseBrowserPublish:
             try:
                 page.click('button:has-text("发布")', timeout=8000)
             except Exception:
+                if self._quota_hit(page, checks=1):
+                    raise HTTPFailure(DAILY_QUOTA_MESSAGE, kind='limit')
                 return True
         # 等待 publishV2 返回（最长约 20 秒）。
         deadline = time.time() + 20
         while time.time() < deadline and not pv2:
+            if self._quota_hit(page, checks=1):
+                raise HTTPFailure(DAILY_QUOTA_MESSAGE, kind='limit')
             page.wait_for_timeout(1000)
         confirmed = accepted_response()
         if confirmed is not None:
             return confirmed
         # 无 publishV2 响应：可能是二次确认弹窗（如无图确认/额度）未处理，需人工。
+        if self._quota_hit(page, checks=1):
+            raise HTTPFailure(DAILY_QUOTA_MESSAGE, kind='limit')
         return True
 
     def _published_ids(self) -> set[str] | None:
@@ -399,12 +410,12 @@ class NeteaseBrowserPublish:
             if client is not None:
                 client.close()
 
-    def _quota_hit(self, page) -> bool:
+    def _quota_hit(self, page, *, checks: int = 10) -> bool:
         """点「发布」后检测当日额度已满弹窗（「今日发布数量已达最大值」）。"""
-        for _ in range(10):
+        for _ in range(checks):
             page.wait_for_timeout(500)
             hit = page.evaluate("""() => {
-                for (const m of document.querySelectorAll('.custom-confirm,.ne-modal,[class*=modal-]')) {
+                for (const m of document.querySelectorAll('.custom-confirm,.ne-modal,[class*=modal-],[role="dialog"]')) {
                     if (m.offsetParent === null) continue;
                     if ((m.innerText || '').indexOf('今日发布数量已达最大值') >= 0) return true;
                 }
