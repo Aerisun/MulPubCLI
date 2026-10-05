@@ -184,7 +184,7 @@ def test_list_delete_rejects_ambiguous_remote_id_and_accepts_local_tracking_id(t
     assert json.loads(second.read_text()).get("tracked") is not False
 
 
-def test_untracking_preserves_duplicate_submission_protection(tmp_path):
+def test_untracking_hides_record_without_deleting_its_history(tmp_path):
     (tmp_path / "cover.jpg").write_bytes(b"cover")
     (tmp_path / "article.md").write_text("# 测试标题\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
     article = Article.load(tmp_path / "article.md")
@@ -194,14 +194,15 @@ def test_untracking_preserves_duplicate_submission_protection(tmp_path):
         "published", "已发布", "https://zhuanlan.zhihu.com/p/123456", "zhihu", "published"))
     stamp = json.loads(path.read_text())["saved_at"]
     assert ledger.untrack_records([(path.stem, stamp)]) == 1
-    assert ledger.may_submit("zhihu", article) is False
     assert cli._ledger_items("zhihu", store) == []
+    assert path.exists()
+    assert json.loads(path.read_text())["status"] == "published"
     ledger.save("zhihu", article, PublishResult(
         "published", "重新提交", "https://zhuanlan.zhihu.com/p/123456", "zhihu", "published"))
     assert json.loads(path.read_text())["tracked"] is True
 
 
-def test_forced_failed_attempt_keeps_previous_published_article_in_list(tmp_path, monkeypatch, capsys):
+def test_failed_repeat_keeps_previous_published_article_in_list(tmp_path, monkeypatch, capsys):
     (tmp_path / "cover.jpg").write_bytes(b"cover")
     source = tmp_path / "article.md"
     source.write_text("# 测试标题\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
@@ -215,7 +216,7 @@ def test_forced_failed_attempt_keeps_previous_published_article_in_list(tmp_path
     monkeypatch.setattr(cli, "_do_publish", lambda *a, **k: PublishResult(
         "failed", "登录需要人工验证", platform="netease"))
     code = cli._cmd_publish(SimpleNamespace(platform="netease", article=str(source),
-                                            force=True, proxy=None), store)
+                                            proxy=None), store)
     assert code == 1
     assert json.loads(capsys.readouterr().out)["status"] == "failed"
     items = cli._ledger_items("netease", store)
@@ -226,7 +227,7 @@ def test_forced_failed_attempt_keeps_previous_published_article_in_list(tmp_path
     assert len(records) == 2
 
 
-def test_skip_after_forced_failure_returns_previous_publication_link(tmp_path, monkeypatch, capsys):
+def test_repeat_after_failed_attempt_submits_again(tmp_path, monkeypatch, capsys):
     (tmp_path / "cover.jpg").write_bytes(b"cover")
     source = tmp_path / "article.md"
     source.write_text("# 测试标题\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
@@ -236,19 +237,30 @@ def test_skip_after_forced_failure_returns_previous_publication_link(tmp_path, m
     url = "https://www.163.com/dy/article/L8EH25420556PYDT.html"
     ledger.checkpoint("netease", article, "submitted", "L8EH25420556PYDT")
     ledger.save("netease", article, PublishResult("published", "已发布", url, "netease", "verified"))
-    monkeypatch.setattr(cli, "_do_publish", lambda *a, **k: PublishResult(
-        "failed", "登录需要人工验证", platform="netease"))
-    cli._cmd_publish(SimpleNamespace(platform="netease", article=str(source), force=True, proxy=None), store)
-    capsys.readouterr()
-    assert cli._cmd_publish(SimpleNamespace(platform="netease", article=str(source), force=False,
-                                            proxy=None), store) == 1
-    skipped = json.loads(capsys.readouterr().out)
-    assert skipped["status"] == "skipped"
-    assert skipped["url"] == url
-    assert skipped["id"] == "L8EH25420556PYDT"
+    calls = []
+
+    def submit(platform, submitted_article, submitted_store, **_kwargs):
+        calls.append(True)
+        article_id = f"L8EH25420556PYD{len(calls)}"
+        ResultLedger(submitted_store.results_dir).checkpoint(
+            platform, submitted_article, "submitted", article_id)
+        status = "failed" if len(calls) == 1 else "pending"
+        return PublishResult(status, "本次结果", platform=platform)
+
+    monkeypatch.setattr(cli, "_do_publish", submit)
+    args = SimpleNamespace(platform="netease", article=str(source), proxy=None)
+    assert cli._cmd_publish(args, store) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "failed"
+    assert cli._cmd_publish(args, store) == 1
+    repeated = json.loads(capsys.readouterr().out)
+    assert calls == [True, True]
+    assert repeated["status"] == "pending"
+    assert repeated["id"] == "L8EH25420556PYD2"
+    assert any(item["id"] == "L8EH25420556PYDT" and item["status"] == "published"
+               for item in cli._ledger_items("netease", store))
 
 
-def test_forced_second_publication_tracks_both_remote_article_ids(tmp_path, monkeypatch):
+def test_second_publication_tracks_both_remote_article_ids(tmp_path, monkeypatch):
     (tmp_path / "cover.jpg").write_bytes(b"cover")
     source = tmp_path / "article.md"
     source.write_text("# 测试标题\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
@@ -266,7 +278,7 @@ def test_forced_second_publication_tracks_both_remote_article_ids(tmp_path, monk
 
     monkeypatch.setattr(cli, "_do_publish", publish)
     cli._cmd_publish(SimpleNamespace(platform="zhihu", article=str(source),
-                                     force=True, proxy=None), store)
+                                     proxy=None), store)
     assert {item["id"] for item in cli._ledger_items("zhihu", store)} == {"123456", "789012"}
 
 

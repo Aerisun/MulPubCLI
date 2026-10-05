@@ -83,20 +83,36 @@ def test_netease_export_waits_for_late_related_cookie(tmp_path):
     login = NeteaseLogin("phone", "password", tmp_path / "netease.json")
     session = {"name": "NTESwebSI", "value": "session", "domain": "mp.163.com",
                "path": "/", "secure": False, "expires": -1}
+    p_info = {"name": "P_INFO", "value": "profile", "domain": ".163.com",
+              "path": "/", "secure": False, "expires": -1}
+    s_info = {"name": "S_INFO", "value": "account", "domain": ".163.com",
+              "path": "/", "secure": False, "expires": -1}
     late = {"name": "URS", "value": "login", "domain": "reg.163.com",
             "path": "/", "secure": False, "expires": -1}
+    late_related = [
+        {"name": "NTES_SESS", "value": "session-extra", "domain": ".163.com",
+         "path": "/", "secure": True, "expires": -1},
+        {"name": "ntes_nnid", "value": "device", "domain": "reg.163.com",
+         "path": "/", "secure": False, "expires": -1},
+    ]
     calls = []
 
     def cookies():
         calls.append(True)
-        return [session] if len(calls) <= 2 else [session, late]
+        initial = [session, p_info, s_info]
+        if len(calls) <= 4:
+            return initial
+        if len(calls) == 5:
+            return [*initial, late]
+        return [*initial, late, *late_related]
 
     page = SimpleNamespace(context=SimpleNamespace(cookies=cookies), wait_for_timeout=lambda _ms: None)
     login._capture_after_login(page)
 
     saved = json.loads(login.destination.read_text(encoding="utf-8"))
-    assert len(calls) >= 3
-    assert {item["name"] for item in saved["cookies"]} == {"NTESwebSI", "URS"}
+    assert len(calls) >= 9
+    assert {item["name"] for item in saved["cookies"]} == {
+        "NTESwebSI", "P_INFO", "S_INFO", "URS", "NTES_SESS", "ntes_nnid"}
 
 
 def test_verified_netease_login_saves_phone_and_password_separately(tmp_path, monkeypatch, capsys):

@@ -63,7 +63,8 @@ class NeteaseLogin:
         valid_names = set()
         for cookie in cookies:
             name = cookie.get('name')
-            if name not in required or not cookie.get('value'):
+            if (name not in required or not cookie.get('value')
+                    or not _allowed(cookie.get('domain', ''))):
                 continue
             expires = cookie.get('expires', -1)
             if (
@@ -83,10 +84,11 @@ class NeteaseLogin:
         stable = 0
         for _ in range(24):
             cookies = page.context.cookies()
-            marker = tuple(sorted((c.get('domain'), c.get('name'), c.get('value'))
-                                  for c in cookies
-                                  if _allowed(c.get('domain', ''))
-                                  and c.get('name') in required))
+            # Wait for the complete 163.com cookie jar to settle. Cookies beyond
+            # the authentication trio can arrive later and are needed by platform APIs.
+            marker = tuple(sorted((c.get('domain'), c.get('name'), c.get('value'),
+                                   c.get('path', '/'))
+                                  for c in cookies if _allowed(c.get('domain', ''))))
             authenticated = self._has_authenticated_cookies(cookies)
             stable = stable + 1 if marker == previous else 0
             if authenticated and stable >= 4:

@@ -27,7 +27,7 @@ def test_sohu_publish_reports_the_submitted_id(tmp_path, monkeypatch, capsys):
         ResultLedger(store.results_dir).checkpoint("sohu", article, "submitted", "42")
         return PublishResult("pending", "搜狐已接收图文投稿", platform="sohu")
     monkeypatch.setattr(cli, "_do_publish", submit)
-    args = SimpleNamespace(platform="sohu", article=str(path), force=False, proxy=None)
+    args = SimpleNamespace(platform="sohu", article=str(path), proxy=None)
 
     assert cli._cmd_publish(args, store) == 1
     result = json.loads(capsys.readouterr().out)

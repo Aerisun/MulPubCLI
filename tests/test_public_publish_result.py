@@ -28,7 +28,7 @@ def test_publish_reports_saved_article_identity(
         return PublishResult("pending", "待核验", platform=platform)
 
     monkeypatch.setattr(cli, "_do_publish", submit)
-    args = SimpleNamespace(platform=platform, article=str(source), force=False, proxy=None)
+    args = SimpleNamespace(platform=platform, article=str(source), proxy=None)
     assert cli._cmd_publish(args, store) == 1
     output = json.loads(capsys.readouterr().out)
     assert output["platform"] == platform
@@ -39,22 +39,43 @@ def test_publish_reports_saved_article_identity(
     assert "verification" in output
 
 
-def test_publish_validation_and_duplicate_results_keep_common_fields(tmp_path, capsys):
+def test_publish_parser_does_not_accept_force_option(capsys):
+    with pytest.raises(SystemExit) as raised:
+        cli._build_parser().parse_args([
+            "publish", "zhihu", "--article", "article.md", "--force"])
+    assert raised.value.code == 2
+    assert "unrecognized arguments: --force" in capsys.readouterr().err
+
+
+def test_publish_resubmits_existing_article_and_keeps_common_fields(tmp_path, monkeypatch, capsys):
     (tmp_path / "cover.jpg").write_bytes(b"cover")
     source = tmp_path / "article.md"
     source.write_text("# 标题\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
     store = StorageLayout(tmp_path)
     article = Article.load(source)
-    args = SimpleNamespace(platform="zhihu", article=str(source), force=False, proxy=None)
-    assert ResultLedger(store.results_dir).reserve("zhihu", article)
-    ResultLedger(store.results_dir).checkpoint("zhihu", article, "submitted", "123456")
+    ledger = ResultLedger(store.results_dir)
+    ledger.checkpoint("zhihu", article, "submitted", "prior-id")
+    ledger.save("zhihu", article, PublishResult(
+        "published", "之前已发布", "https://zhuanlan.zhihu.com/p/prior-id",
+        "zhihu", "published"))
+    args = SimpleNamespace(platform="zhihu", article=str(source), proxy=None)
+    calls = []
+
+    def submit(platform, submitted_article, submitted_store, **_kwargs):
+        calls.append(platform)
+        ResultLedger(submitted_store.results_dir).checkpoint(
+            platform, submitted_article, "submitted", "123456")
+        return PublishResult("pending", "等待核验", platform=platform)
+
+    monkeypatch.setattr(cli, "_do_publish", submit)
 
     assert cli._cmd_publish(args, store) == 1
-    skipped = json.loads(capsys.readouterr().out)
-    assert skipped["status"] == "skipped"
-    assert skipped["id"] == "123456"
-    assert skipped["title"] == article.title
-    assert "id" in skipped and "verification" in skipped and "url" in skipped
+    submitted = json.loads(capsys.readouterr().out)
+    assert calls == ["zhihu"]
+    assert submitted["status"] == "pending"
+    assert submitted["id"] == "123456"
+    assert submitted["title"] == article.title
+    assert "id" in submitted and "verification" in submitted and "url" in submitted
 
     invalid = tmp_path / "invalid.md"
     invalid.write_text("# 标题\n正文，没有封面。", encoding="utf-8")

@@ -614,7 +614,7 @@ def test_gallery_or_browser_publish_rejects_remote_images_before_submitting(
         "开头。\n\n![远程图](https://example.com/pic.jpg)\n\n结尾。",
         encoding="utf-8",
     )
-    args = SimpleNamespace(platform=platform, article=str(source), force=False, proxy=None)
+    args = SimpleNamespace(platform=platform, article=str(source), proxy=None)
     code = _cmd_publish(args, StorageLayout(tmp_path))
     payload = json.loads(capsys.readouterr().out)
     assert code == 2
