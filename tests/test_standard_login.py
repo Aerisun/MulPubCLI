@@ -75,26 +75,24 @@ class CLIQRLoginTests(unittest.TestCase):
             self.assertFalse(zhihu_profile.exists())
             self.assertTrue((sohu_profile / 'Cookies').exists())
 
-    def test_zhihu_refresh_is_forwarded_to_browser_login(self):
+    def test_refresh_is_rejected_for_qr_platforms_without_touching_sessions(self):
         with TemporaryDirectory() as tmp:
             store = StorageLayout(Path(tmp))
-            args = SimpleNamespace(platform='zhihu', refresh=True, proxy=None)
-            with patch('mulpubcli.__main__._zhihu_browser_login', return_value=0) as browser:
-                self.assertEqual(_cmd_login(args, store), 0)
-            self.assertTrue(browser.call_args.kwargs['refresh'])
-
-    def test_zhihu_refresh_discards_browser_session_before_start(self):
-        with TemporaryDirectory() as tmp:
-            store = StorageLayout(Path(tmp))
-            profile = store.auth_dir / 'zhihu-profile'
-            profile.mkdir(parents=True)
-            (profile / 'Cookies').write_bytes(b'old')
-            with patch('mulpubcli.platforms.zhihu.browser_login.ZhihuBrowserLogin') as factory, \
-                 patch('mulpubcli.__main__._out'):
-                factory.return_value.run.side_effect = lambda: (
-                    {'status': 'ok'} if not profile.exists() else {'status': 'failed'})
-                self.assertEqual(_zhihu_browser_login(
-                    store, store.credentials('zhihu'), refresh=True), 0)
+            for platform in ('zhihu', 'xiaohongshu', 'toutiao'):
+                with self.subTest(platform=platform):
+                    credential = store.credentials(platform)
+                    credential.write_text('existing', encoding='utf-8')
+                    args = SimpleNamespace(platform=platform, refresh=True, proxy=None)
+                    with patch('mulpubcli.__main__._out') as out, \
+                         patch('mulpubcli.__main__._zhihu_login') as zhihu, \
+                         patch('mulpubcli.__main__._xhs_login') as xhs, \
+                         patch('mulpubcli.__main__._new_client') as new_client:
+                        self.assertEqual(_cmd_login(args, store), 1)
+                    self.assertIn('reset', out.call_args.args[0]['message'])
+                    self.assertEqual(credential.read_text(encoding='utf-8'), 'existing')
+                    zhihu.assert_not_called()
+                    xhs.assert_not_called()
+                    new_client.assert_not_called()
 
     def test_legacy_toutiao_poll_keeps_waiting_as_successful_check(self):
         with TemporaryDirectory() as tmp:

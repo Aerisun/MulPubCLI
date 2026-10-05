@@ -25,7 +25,7 @@ class NeteaseLogin:
     """驱动一次网易浏览器登录并导出凭证到持久化文件。"""
 
     def __init__(self, phone: str, password: str, destination: Path,
-                 *, account_id: str = ''):
+                 *, account_id: str = '', fresh_browser: bool = False):
         if not isinstance(phone, str) or not isinstance(password, str):
             raise ValueError('网易手机号与密码须为字符串')
         if '\r' in phone or '\n' in phone or '\r' in password or '\n' in password:
@@ -34,6 +34,7 @@ class NeteaseLogin:
         self.password = password
         self.destination = destination
         self.account_id = account_id
+        self.fresh_browser = fresh_browser
 
     # ─────────────────────────────────────────────
     # perform 回调：自动填 URS 登录表单并提交
@@ -185,7 +186,10 @@ class NeteaseLogin:
         staged.unlink()
         self.destination = staged
         try:
-            loginer = PlaywrightLoginer(storage_state_dir=target.parent)
+            browser_options = {'storage_state_dir': target.parent}
+            if self.fresh_browser:
+                browser_options['profile_name'] = None
+            loginer = PlaywrightLoginer(**browser_options)
             result = loginer.login(_LOGIN_URL, self._perform, headless=headless,
                                    wait_after_auto_ms=0, wait_between_checks_ms=1000,
                                    max_human_wait_ms=300_000, viewport=(1360, 900))
@@ -201,6 +205,9 @@ class NeteaseLogin:
                 client = NeteaseWeb.load(staged)
                 try:
                     info = client.account()
+                    if self.account_id and str(info.get('id', '')) != str(self.account_id):
+                        return {'platform': 'netease', 'status': 'failed',
+                                'message': '浏览器登录的网易账号与原账号不一致，未替换凭证'}
                     client.save(staged)
                 finally:
                     client.close()

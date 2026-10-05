@@ -1,7 +1,7 @@
 """mulpubcli — 统一多平台 HTTP 发布 CLI。
 
 命令一览：
-  mulpubcli login   <platform> [--refresh] [--method sms]
+  mulpubcli login   <platform> [--method sms]  # --refresh 仅用于搜狐和网易续期
   mulpubcli session [<platform>]        # 实时探测各平台登录态（联网核验）
   mulpubcli reset   <platform>          # 清理登录状态后重新登录
   mulpubcli publish <platform> --article FILE
@@ -128,6 +128,23 @@ def _saved_login_pair(store: StorageLayout, platform: str) -> tuple[str, str] | 
     return data['phone'], data['password']
 
 
+def _saved_account_id(path: Path, *, require_identity: bool = False) -> str:
+    """Read the identity that a renewed browser credential must retain."""
+    if not path.is_file():
+        return ''
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(data, dict):
+            raise ValueError('invalid credential')
+    except (OSError, ValueError):
+        raise HTTPFailure('原登录凭证无法读取，停止刷新续期', kind='local_state_invalid') from None
+    account_id = data.get('wemedia_id') or data.get('account_id')
+    if require_identity and not account_id:
+        raise HTTPFailure('原登录凭证缺少账号标识，无法安全刷新续期；请先核验旧登录态或执行 reset 后重新登录',
+                          kind='local_state_invalid')
+    return str(account_id or '')
+
+
 def _save_login_pair(store: StorageLayout, platform: str, phone: str, password: str) -> None:
     private_json(store.login_secret(platform), {'phone': phone, 'password': password})
 
@@ -173,7 +190,8 @@ def _auto_renew_credentials(platform: str, store: StorageLayout, *, proxy: str |
             result = NeteaseLogin(phone, password, cred_path, account_id=expected_id).run(headless=True)
         else:
             from .platforms.sohu.login import SohuLogin
-            result = SohuLogin(phone, password, cred_path, account_id=expected_id).run(headless=True)
+            result = SohuLogin(phone, password, cred_path, account_id=expected_id,
+                               allow_human=False).run(headless=True)
         if result.get('status') != 'ok':
             kind = 'verification_required' if result.get('status') == 'need_human' else 'authentication_required'
             raise HTTPFailure(result.get('message') or f'{PLATFORM_NAMES[platform]}自动续期未完成', kind=kind)
@@ -311,13 +329,20 @@ def _probe_account(platform: str, store: StorageLayout, cred_path: Path, *, prox
         raise
     finally:
         _close(client)
+    next_step = (f'如需刷新续期请执行 login {platform} --refresh'
+                 if platform in ('netease', 'sohu') else
+                 f'如需重新登录请先执行 reset {platform}，再执行 login {platform}')
     return _login_result(platform, cred_path, info=info,
-                         message='登录态有效可直接使用；如需重新登录请执行 login --refresh')
+                         message=f'登录态有效可直接使用；{next_step}')
 
 
 def _cmd_login(args, store: StorageLayout) -> int:
     platform = args.platform
     proxy = getattr(args, "proxy", None)
+    if getattr(args, 'refresh', False) and platform not in ('netease', 'sohu'):
+        _out({'status': 'failed', 'platform': platform,
+              'message': f'--refresh 仅用于网易和搜狐刷新续期凭证；{platform} 请先执行 reset {platform}，再执行 login {platform}'})
+        return 1
     # Clean up stale QR codes on every login command
     store.cleanup_stale_qr()
 
@@ -359,7 +384,7 @@ def _cmd_login(args, store: StorageLayout) -> int:
                 #  - an authenticated session can never mint a QR, so it must fall back to
                 #    a fresh anonymous device session when a new QR is needed.
                 authenticated_cred = cred_path.is_file() and _session_is_authenticated(cred_path)
-                if not args.refresh and authenticated_cred:
+                if authenticated_cred:
                     probe = _probe_account(platform, store, cred_path, proxy=proxy)
                     if probe is not None:
                         _out(probe)
@@ -371,7 +396,7 @@ def _cmd_login(args, store: StorageLayout) -> int:
                     client = _new_client(platform, proxy=proxy)
                 result = wait_for_qr_login(
                     platform=platform, qr_image=str(qr_path),
-                    begin=lambda refresh: client.start_login(qr_path, refresh=args.refresh or refresh),
+                    begin=lambda refresh: client.start_login(qr_path, refresh=refresh),
                     poll=client.poll_login, save=lambda: client.save(cred_path), emit=_out)
     except (FileNotFoundError, PermissionError, ValueError) as exc:
         _out({"status": "error", "message": str(exc)})
@@ -428,7 +453,7 @@ def _xhs_login(args, store: StorageLayout) -> int:
                     if data.get('login') and not pending_path.exists():
                         # Resume a login session written by the previous single-file flow.
                         private_json(pending_path, data)
-                    if not args.poll and not args.refresh and (data.get('cookie') or data.get('cookies')):
+                    if not args.poll and (data.get('cookie') or data.get('cookies')):
                         probe = _probe_credential(platform, store, proxy=getattr(args, 'proxy', None))
                         if probe['status'] == 'authenticated':
                             _out(_login_result(platform, cred_path, message='登录态有效可直接使用'))
@@ -446,7 +471,7 @@ def _xhs_login(args, store: StorageLayout) -> int:
                 else:
                     result = wait_for_qr_login(
                         platform=platform, qr_image=str(qr_path),
-                        begin=lambda refresh: client.start_login(qr_path, refresh=args.refresh or refresh),
+                        begin=lambda refresh: client.start_login(qr_path, refresh=refresh),
                         poll=client.poll_login, save=client.save, emit=_out)
                 if result.get('status') == 'authenticated':
                     client.export(cred_path)
@@ -483,7 +508,7 @@ def _zhihu_login(args, store: StorageLayout) -> int:
     """
     platform = "zhihu"
     cred_path = store.credentials(platform)
-    if not getattr(args, 'refresh', False) and cred_path.is_file():
+    if cred_path.is_file():
         try:
             probe = _probe_account(platform, store, cred_path,
                                    proxy=getattr(args, 'proxy', None))
@@ -493,24 +518,24 @@ def _zhihu_login(args, store: StorageLayout) -> int:
         if probe is not None:
             _out(probe)
             return 0
-    return _zhihu_browser_login(store, cred_path,
-                                refresh=getattr(args, 'refresh', False),
-                                proxy=getattr(args, "proxy", None))
+    return _zhihu_browser_login(store, cred_path, proxy=getattr(args, "proxy", None))
 
 
 def _clear_zhihu_browser_profile(cred_path: Path) -> Path | None:
     from .platforms.zhihu.browser_login import PROFILE_NAME
-    profile = cred_path.parent / PROFILE_NAME
+    return _clear_browser_profile(cred_path.parent / PROFILE_NAME)
+
+
+def _clear_browser_profile(profile: Path) -> Path | None:
     if profile.is_symlink():
-        raise ValueError('知乎浏览器配置目录不能是符号链接')
+        raise ValueError('浏览器配置目录不能是符号链接')
     if not profile.is_dir():
         return None
     shutil.rmtree(profile)
     return profile
 
 
-def _zhihu_browser_login(store: StorageLayout, cred_path: Path, *, proxy=None,
-                         refresh=False) -> int:
+def _zhihu_browser_login(store: StorageLayout, cred_path: Path, *, proxy=None) -> int:
     """一条命令完成知乎扫码登录：拉起浏览器→抠出二维码→等待页面事件即导出。
 
     不需要第二个终端或转发器，也不起 HTTP 服务：登录页二维码由
@@ -531,8 +556,6 @@ def _zhihu_browser_login(store: StorageLayout, cred_path: Path, *, proxy=None,
                                 on_human_needed=_human)
     try:
         with session_lock(cred_path):
-            if refresh:
-                _clear_zhihu_browser_profile(cred_path)
             res = loginer.run()
         if res.get("status") != "ok":
             _out({"status": res.get('status', 'error'), "platform": platform,
@@ -560,9 +583,10 @@ def _netease_login(args, store: StorageLayout) -> int:
     """
     platform = "netease"
     cred_path = store.credentials(platform)
+    refresh = bool(getattr(args, 'refresh', False))
 
     # 复用现有有效登录态（self refresh 前先探测）。
-    if not getattr(args, "refresh", False) and cred_path.is_file():
+    if not refresh and cred_path.is_file():
         probe = _probe_account(platform, store, cred_path,
                                proxy=getattr(args, "proxy", None))
         if probe is not None:
@@ -575,22 +599,39 @@ def _netease_login(args, store: StorageLayout) -> int:
     except HTTPFailure as exc:
         _out(exc.as_dict())
         return 1
-    phone = getattr(args, "phone", None) or os.environ.get("NETEASE_PHONE", "") or saved[0]
-    password = getattr(args, "password", None) or os.environ.get("NETEASE_PASS", "") or saved[1]
-    if not phone:
-        phone = input("请输入网易号手机号: ").strip()
-    if not password:
-        import getpass
-        password = getpass.getpass("请输入网易号密码（不回显）: ")
+    if refresh:
+        phone = getattr(args, 'phone', None) or saved[0] or os.environ.get('NETEASE_PHONE', '')
+        password = getattr(args, 'password', None) or saved[1] or os.environ.get('NETEASE_PASS', '')
+        if not phone or not password:
+            _out({'status': 'failed', 'platform': platform,
+                  'message': '缺少自动续期所需的手机号或密码；请设置 NETEASE_PHONE / NETEASE_PASS，或显式提供 --phone / --password 后重试'})
+            return 1
+    else:
+        phone = getattr(args, 'phone', None) or os.environ.get('NETEASE_PHONE', '') or saved[0]
+        password = getattr(args, 'password', None) or os.environ.get('NETEASE_PASS', '') or saved[1]
+        if not phone:
+            phone = input('请输入网易号手机号: ').strip()
+        if not password:
+            import getpass
+            password = getpass.getpass('请输入网易号密码（不回显）: ')
+    fresh_browser = refresh and (not saved[0] or (phone, password) != saved)
 
     from .platforms.netease.login import NeteaseLogin
     try:
         print('[网易] 正在打开登录页并核验账号…', file=sys.stderr, flush=True)
-        result = NeteaseLogin(phone, password, cred_path).run(headless=True)
+        with session_lock(cred_path):
+            expected_id = _saved_account_id(
+                cred_path, require_identity=refresh)
+            result = NeteaseLogin(phone, password, cred_path,
+                                  account_id=expected_id,
+                                  fresh_browser=fresh_browser).run(headless=True)
+            if result.get('status') == 'ok':
+                _save_login_pair(store, platform, phone, password)
         if result.get('status') == 'ok':
-            _save_login_pair(store, platform, phone, password)
             _out(_login_result(platform, cred_path, info=result,
-                               message=result.get('message', '网易浏览器登录成功')))
+                               message=('续期凭证已刷新，账号已核验'
+                                        if refresh else
+                                        result.get('message', '网易浏览器登录成功'))))
             return 0
         _out(result)
         return 1
@@ -606,7 +647,8 @@ def _sohu_login(args, store: StorageLayout) -> int:
     """优先复用有效凭证；失效时用浏览器登录并核验账号。"""
     platform = "sohu"
     cred_path = store.credentials(platform)
-    if not getattr(args, 'refresh', False) and cred_path.is_file():
+    refresh = bool(getattr(args, 'refresh', False))
+    if not refresh and cred_path.is_file():
         try:
             probe = _probe_account(platform, store, cred_path,
                                    proxy=getattr(args, 'proxy', None))
@@ -628,33 +670,42 @@ def _sohu_login(args, store: StorageLayout) -> int:
     except HTTPFailure as exc:
         _out(exc.as_dict())
         return 1
-    phone = getattr(args, "phone", None) or os.environ.get("SOHU_PHONE", "") or saved[0]
-    password = getattr(args, "password", None) or os.environ.get("SOHU_PASSWORD", "") or saved[1]
-    if not phone:
-        phone = input("请输入搜狐手机号: ").strip()
-    if not password:
-        import getpass
-        password = getpass.getpass("请输入搜狐密码（不回显）: ")
-
-    expected_id = ''
-    if saved[0] == phone and cred_path.is_file():
-        try:
-            expected_id = str(json.loads(cred_path.read_text(encoding='utf-8')).get('account_id') or '')
-        except (OSError, ValueError, AttributeError):
-            pass
+    if refresh:
+        phone = getattr(args, 'phone', None) or saved[0] or os.environ.get('SOHU_PHONE', '')
+        password = getattr(args, 'password', None) or saved[1] or os.environ.get('SOHU_PASSWORD', '')
+        if not phone or not password:
+            _out({'status': 'failed', 'platform': platform,
+                  'message': '缺少自动续期所需的手机号或密码；请设置 SOHU_PHONE / SOHU_PASSWORD，或显式提供 --phone / --password 后重试'})
+            return 1
+    else:
+        phone = getattr(args, 'phone', None) or os.environ.get('SOHU_PHONE', '') or saved[0]
+        password = getattr(args, 'password', None) or os.environ.get('SOHU_PASSWORD', '') or saved[1]
+        if not phone:
+            phone = input('请输入搜狐手机号: ').strip()
+        if not password:
+            import getpass
+            password = getpass.getpass('请输入搜狐密码（不回显）: ')
+    fresh_browser = refresh and (not saved[0] or (phone, password) != saved)
 
     from .platforms.sohu.login import SohuLogin
 
     try:
         print('[搜狐] 正在打开登录页并核验账号…', file=sys.stderr, flush=True)
         with session_lock(cred_path):
+            expected_id = _saved_account_id(
+                cred_path, require_identity=refresh)
             result = SohuLogin(phone, password, cred_path,
-                               account_id=expected_id).run(headless=not show_browser)
+                               account_id=expected_id,
+                               bootstrap_existing=saved[0] == phone,
+                               fresh_browser=fresh_browser,
+                               allow_human=not refresh or show_browser).run(headless=not show_browser)
             if result.get('status') == 'ok':
                 _save_login_pair(store, platform, phone, password)
         if result.get('status') == 'ok':
             _out(_login_result(platform, cred_path, info=result,
-                               message=result.get('message', '搜狐浏览器登录成功')))
+                               message=('续期凭证已刷新，账号已核验'
+                                        if refresh else
+                                        result.get('message', '搜狐浏览器登录成功'))))
             return 0
         _out(result)
         return 1
@@ -774,6 +825,17 @@ def _cmd_reset(args, store: StorageLayout) -> int:
                 profile = _clear_zhihu_browser_profile(path)
                 if profile is not None:
                     removed.append(str(profile))
+            if args.platform == 'netease':
+                # NetEase's existing persistent browser directory uses this legacy name.
+                profile = _clear_browser_profile(store.auth_dir / 'sohu-profile')
+                if profile is not None:
+                    removed.append(str(profile))
+            if args.platform == 'sohu':
+                for candidate in store.auth_dir.glob('sohu-*'):
+                    if re.fullmatch(r'sohu-[0-9a-f]{20}', candidate.name):
+                        profile = _clear_browser_profile(candidate)
+                        if profile is not None:
+                            removed.append(str(profile))
             for target in targets:
                 if target.is_file():
                     target.unlink()
@@ -1894,7 +1956,8 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog="""
 示例:
   mulpubcli login toutiao              # 生成登录二维码（小红书、头条） / 浏览器扫码（知乎）
-  mulpubcli login toutiao --refresh    # 弃用已有登录，并重新登录
+  mulpubcli reset toutiao             # 清理头条登录态；再执行 login toutiao
+  mulpubcli login sohu --refresh      # 刷新搜狐当前账号的续期凭证
   mulpubcli session                    # 查看各平台本地登录状态
   mulpubcli session zhihu              # 只看知乎登录状态
   mulpubcli reset zhihu                # 清理知乎登录状态
@@ -1915,7 +1978,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     # login
-    p_login = sub.add_parser("login", help="扫码或短信登录")
+    p_login = sub.add_parser("login", help="登录并核验凭证")
     p_login.add_argument("platform", choices=PLATFORMS)
     p_login.add_argument("--method", choices=("qr", "sms"), default="qr", help="登录方式（默认 qr）")
     grp = p_login.add_mutually_exclusive_group()
@@ -1924,7 +1987,7 @@ def _build_parser() -> argparse.ArgumentParser:
     grp.add_argument("--cookie-file", metavar="FILE",
                      help="网易号凭 Cookie 登录的兜底：从浏览器导出的网易 Cookie 文件导入（其他平台忽略）")
     p_login.add_argument("--refresh", action="store_true",
-                         help="强制刷新登录（忽略现有登录态）")
+                         help="仅网易、搜狐：自动读取已保存信息并刷新当前账号的续期凭证；其他平台请使用 reset")
     p_login.add_argument("--phone", metavar="PHONE",
                          help="登录手机号（网易用 NETEASE_PHONE、搜狐用 SOHU_PHONE；成功登录后保存供续期）")
     p_login.add_argument("--password", metavar="PASS",
@@ -1937,7 +2000,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_session.add_argument("platform", nargs="?", choices=PLATFORMS)
 
     # reset
-    p_reset = sub.add_parser("reset", help="清理指定平台登录状态并重新登录")
+    p_reset = sub.add_parser("reset", help="清理指定平台登录状态")
     p_reset.add_argument("platform", choices=PLATFORMS)
 
     # publish

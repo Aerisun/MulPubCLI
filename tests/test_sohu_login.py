@@ -209,6 +209,21 @@ class SohuLoginTests(unittest.TestCase):
                 login._perform(page, None, None)
         export.assert_not_called()
 
+    def test_automatic_refresh_does_not_send_sms_or_prompt_for_code(self):
+        login = SohuLogin('phone', 'password', Path('/tmp/unused-sohu.json'),
+                          allow_human=False)
+        page = Mock()
+        page.context.cookies.return_value = [{'name': 'mp-cv', 'value': 'valid'}]
+        page.url = 'https://mp.sohu.com/clientAuth'
+        page.evaluate.return_value = '短信验证'
+        with patch.object(login, '_solve_sms_code') as send_sms, \
+             patch.object(login, '_export') as export:
+            with self.assertRaises(HTTPFailure) as failure:
+                login._perform(page, None, None)
+        self.assertEqual(failure.exception.kind, 'verification_required')
+        send_sms.assert_not_called()
+        export.assert_not_called()
+
     def test_waits_for_editor_application_before_deciding_no_sms(self):
         login = SohuLogin('phone', 'password', Path('/tmp/unused-sohu.json'))
         page = Mock()
@@ -368,6 +383,7 @@ class SohuLoginTests(unittest.TestCase):
             self.assertEqual(payload['status'], 'authenticated')
             self.assertEqual(payload['account_id'], '123')
             self.assertEqual(payload['username'], 'Alice')
+            self.assertIn('续期凭证已刷新', payload['message'])
 
     def test_cli_refresh_passes_saved_account_when_phone_matches(self):
         with TemporaryDirectory() as root:
@@ -386,6 +402,27 @@ class SohuLoginTests(unittest.TestCase):
                 login.return_value.run.return_value = {'status': 'failed'}
                 _sohu_login(args, store)
             self.assertEqual(login.call_args.kwargs['account_id'], 'original')
+            self.assertFalse(login.call_args.kwargs['allow_human'])
+
+    def test_cli_refresh_checks_original_account_without_reusing_other_phone_cookies(self):
+        with TemporaryDirectory() as root:
+            store = StorageLayout(Path(root))
+            cred = store.credentials('sohu')
+            cred.parent.mkdir(parents=True, exist_ok=True)
+            cred.write_text(json.dumps({'account_id': 'original', 'cookies': []}),
+                            encoding='utf-8')
+            from mulpubcli.http import private_json
+            private_json(store.login_secret('sohu'),
+                         {'phone': '13500000000', 'password': 'old-secret'})
+            args = SimpleNamespace(refresh=False, phone='13900000000',
+                                   password='new-secret', proxy=None, show_browser=False)
+            with patch('mulpubcli.platforms.sohu.login.SohuLogin') as login, \
+                 patch('mulpubcli.__main__._probe_account', return_value=None), \
+                 patch('mulpubcli.__main__._out'):
+                login.return_value.run.return_value = {'status': 'failed'}
+                _sohu_login(args, store)
+            self.assertEqual(login.call_args.kwargs['account_id'], 'original')
+            self.assertFalse(login.call_args.kwargs['bootstrap_existing'])
 
     def test_cli_can_show_browser_for_manual_page_challenge(self):
         args = _build_parser().parse_args(['login', 'sohu', '--show-browser'])

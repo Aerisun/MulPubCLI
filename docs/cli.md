@@ -44,14 +44,15 @@ mulpubcli [--root DIR] [--proxy URL] <command> ...
 ## login — 登录
 
 ```
-mulpubcli login <platform> [--method qr|sms] [--refresh] [--poll|--confirm|--cookie-file FILE]
+mulpubcli login <platform> [--method qr|sms] [--poll|--confirm|--cookie-file FILE]
+mulpubcli login <netease|sohu> --refresh [--phone PHONE] [--password PASS]
 ```
 
-知乎、小红书、今日头条的默认二维码登录会在同一条命令中先输出 `waiting` 和二维码路径，保持进程等待；扫码并通过账号核验后输出 `authenticated`。小红书和头条在二维码失效时返回 `expired`，下次执行 `login` 获取新码；知乎跟随登录页自动换码，并更新同一路径下的图片。已保存且实时核验有效的登录态直接返回 `authenticated`。
+知乎、小红书、今日头条的默认二维码登录会在同一条命令中先输出 `waiting` 和二维码路径，保持进程等待；扫码并通过账号核验后输出 `authenticated`。小红书和头条在二维码失效时返回 `expired`，下次执行 `login` 获取新码；知乎跟随登录页自动换码，并更新同一路径下的图片。已保存且实时核验有效的登录态直接返回 `authenticated`。这三个平台如需清除旧登录态，先执行 `reset <platform>`，再执行 `login <platform>`；`--refresh` 对它们会直接报错。
 
 知乎使用真实浏览器取得扫码地址，再生成独立的高清二维码 PNG；扫码状态由登录页自行查询，CLI 只监听页面响应，不另发查询请求。小红书和头条使用各自的二维码接口。三者最终都把可发布凭证保存在 `.storage/auth/<platform>.json`。
 
-网易号和搜狐号使用按需启动的浏览器登录。已有凭证经实时核验有效时，`login` 会直接返回账号 ID、名称和凭证路径，不再提示输入账号密码；`--refresh` 会重新核验并更新浏览器凭证。搜狐会为每个手机号复用同一浏览器配置，并从已核验的原账号凭证补回会话 Cookie，优先直接进入后台；只有授权失效时才用账号密码登录，搜狐仍要求设备验证时才发送短信。一次账号密码登录成功后，工具将手机号和密码保存在 `.storage/auth/<platform>-login.json`（权限 600），与 Cookie 凭证文件分开。后续执行需要登录态的命令时，若账号接口明确确认凭证失效，会用保存的信息自动重新登录、核验仍是原账号，然后继续原操作。也可用 `NETEASE_PHONE` / `NETEASE_PASS` 或 `SOHU_PHONE` / `SOHU_PASSWORD` 提供续期信息。已有安装若只有 Cookie 而没有保存的账号密码，需要先执行一次 `login netease --refresh` 或 `login sohu --refresh`。网络故障不会触发重新登录；提交结果不明时也不会自动重发。
+网易号和搜狐号使用按需启动的浏览器登录。已有凭证经实时核验有效时，`login` 会直接返回账号 ID、名称和凭证路径，不再提示输入账号密码；`--refresh` 表示主动刷新当前账号的续期凭证。默认直接使用已保存的手机号和密码，不再询问输入；没有保存的信息时可用环境变量或显式参数提供。核验新凭证后才替换旧凭证，失败时保留旧凭证。若显式提供了与已保存信息不同的手机号或密码，会用干净的浏览器会话实际登录，并确认仍是原账号后才更新保存的信息；切换账号请先执行 `reset`。搜狐会为每个手机号复用同一浏览器配置，并从已核验的原账号凭证补回会话 Cookie，优先直接进入后台；只有授权失效时才用账号密码登录。自动 `--refresh` 和后台自动续期遇到搜狐短信授权都会停止并保留旧凭证，不发送短信或等待输入；需要人工处理时可走交互式登录流程。一次账号密码登录成功后，工具将手机号和密码保存在 `.storage/auth/<platform>-login.json`（权限 600），与 Cookie 凭证文件分开。后续执行需要登录态的命令时，若账号接口明确确认凭证失效，会用保存的信息自动重新登录、核验仍是原账号，然后继续原操作。也可用 `NETEASE_PHONE` / `NETEASE_PASS` 或 `SOHU_PHONE` / `SOHU_PASSWORD` 提供续期信息。已有安装若只有 Cookie 而没有保存的账号密码，需要用环境变量或显式参数执行一次 `login netease --refresh` 或 `login sohu --refresh`。网络故障不会触发重新登录；提交结果不明时也不会自动重发。
 
 网易号登录会在浏览器跳转完成后收集 `163.com` 及其子域名的 Cookie，并在 HTTP 核验后保留它们。搜狐打开文章编辑页后若进入 `/clientAuth`，会在浏览器里点击“获取验证码”，确认发送接口成功后才提示输入短信。若搜狐先要求页面滑块，命令会临时提供一个仅监听 `127.0.0.1` 的小窗口地址；窗口显示原浏览器的验证码区域，并把拖动动作传回原会话。滑块窗口最多等待 2 分钟；短信验证码若接口未提供有效期，也最多等待 2 分钟（可用 `SOHU_SMS_CODE_TTL_SECONDS` 调整）。到期后登录结束。窗口只在验证期间运行，不复制 Cookie，不启动第二个浏览器。新凭证通过编辑页和账号接口核验后才替换原凭证。
 
@@ -71,14 +72,15 @@ mulpubcli login toutiao
 mulpubcli login xiaohongshu
 mulpubcli login zhihu
 
-# 强制重新登录（生成全新二维码）
-mulpubcli login toutiao --refresh
+# 清理旧登录态后重新登录（小红书、知乎、头条）
+mulpubcli reset toutiao
+mulpubcli login toutiao
 
 # 网易号、搜狐号：已有有效登录态时直接复用
 mulpubcli login netease
 mulpubcli login sohu
 
-# 需要重新登录时
+# 主动刷新当前账号的续期凭证
 mulpubcli login netease --refresh
 mulpubcli login sohu --refresh
 mulpubcli login sohu --refresh --show-browser  # 页面验证码需人工操作且有图形显示时
@@ -97,7 +99,7 @@ mulpubcli login xiaohongshu --method sms --confirm  # 输入验证码完成登�
 | `--method sms` | 短信登录（仅小红书） |
 | `--poll` | 兼容旧流程：对小红书或头条的已有二维码只检查一次 |
 | `--confirm` | 输入短信验证码确认（仅 `--method sms`） |
-| `--refresh` | 重新核验并更新登录态；搜狐优先复用已授权浏览器，成功后保存续期用的手机号和密码 |
+| `--refresh` | 仅网易、搜狐：自动读取已保存信息并刷新当前账号的续期凭证，无需再次输入；新凭证核验失败时保留旧凭证。其他平台用 `reset` 后重新 `login` |
 | `--show-browser` | 搜狐登录显示浏览器窗口以完成人工页面验证，需要图形显示 |
 | `--cookie-file FILE` | 保留参数；当前实现尚未读取该文件，不能用于导入网易号登录态 |
 
@@ -146,7 +148,7 @@ mulpubcli session zhihu    # 只看知乎
 mulpubcli reset <platform>
 ```
 
-删除指定平台的登录凭证和二维码；网易号和搜狐号还会删除保存的手机号与密码，知乎会清理自己的浏览器配置，小红书会清理待扫码及短信登录会话。下一次 `login` 从头开始，适合清理卡死状态或切换账号。
+删除指定平台的登录凭证和二维码；网易号和搜狐号还会删除保存的手机号、密码及各自的浏览器配置，知乎会清理自己的浏览器配置，小红书会清理待扫码及短信登录会话。下一次 `login` 从头开始，适合清理卡死状态或切换账号。
 
 ```bash
 mulpubcli reset zhihu
@@ -320,6 +322,7 @@ mulpubcli storage
 │   ├── netease.json
 │   ├── sohu.json
 │   ├── zhihu-profile/   # CLI 管理的浏览器配置
+│   ├── sohu-profile/    # 网易沿用的浏览器配置目录名
 │   ├── sohu-<手机号哈希>/  # 每个搜狐手机号独立的浏览器配置
 │   ├── auto/            # 手工保存的浏览器用户数据
 │   └── ck.txt           # 手工导出的 Cookie 文件

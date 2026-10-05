@@ -67,7 +67,9 @@ class SohuLogin:
     def __init__(self, phone: str, password: str, destination: Path,
                  *, account_id: str = '', on_challenge=None, mirror_port: int = 0,
                  sms_code_provider: Callable[[int], str] | None = None,
-                 cancel_event: threading.Event | None = None):
+                 cancel_event: threading.Event | None = None,
+                 bootstrap_existing: bool = True, fresh_browser: bool = False,
+                 allow_human: bool = True):
         if not isinstance(phone, str) or not isinstance(password, str):
             raise ValueError('搜狐手机号与密码须为字符串')
         if '\r' in phone or '\n' in phone or '\r' in password or '\n' in password:
@@ -82,6 +84,9 @@ class SohuLogin:
         self.mirror_port = mirror_port
         self.sms_code_provider = sms_code_provider
         self.cancel_event = cancel_event
+        self.bootstrap_existing = bootstrap_existing
+        self.fresh_browser = fresh_browser
+        self.allow_human = allow_human
         self._bootstrap_cookies: list[dict] = []
         self._bootstrap_dv_id = ''
 
@@ -349,6 +354,9 @@ class SohuLogin:
 
         # 第二步：搜狐要求设备授权时，由终端输入短信验证码。
         if need_human:
+            if not self.allow_human:
+                raise HTTPFailure('搜狐要求短信授权，自动刷新已停止；旧凭证未替换，请通过交互式登录完成验证',
+                                  kind='verification_required')
             if not self._solve_sms_code(page):
                 raise HTTPFailure('搜狐需要短信授权，但验证码未完成',
                                   kind='verification_required')
@@ -408,12 +416,14 @@ class SohuLogin:
         staged.unlink()
         self.destination = staged
         self._headless = headless
-        self._bootstrap_cookies, self._bootstrap_dv_id = self._bootstrap_from_existing(
-            target, self.account_id)
+        self._bootstrap_cookies, self._bootstrap_dv_id = (
+            self._bootstrap_from_existing(target, self.account_id)
+            if self.bootstrap_existing and not self.fresh_browser else ([], ''))
         try:
             loginer = PlaywrightLoginer(user_agent=USER_AGENT,
                                         storage_state_dir=target.parent,
-                                        profile_name=self._profile_name(self.phone))
+                                        profile_name=(None if self.fresh_browser else
+                                                      self._profile_name(self.phone)))
             result = loginer.login(LOGIN_URL, self._perform, headless=headless,
                                    wait_after_auto_ms=0)
             if result.status != 'ok':

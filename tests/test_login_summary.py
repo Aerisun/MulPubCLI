@@ -43,3 +43,4 @@ def test_netease_cli_new_login_uses_authenticated_summary():
         assert payload['username'] == '作者'
         assert payload['account_details'] == {'today_published': 2}
         assert payload['credential_path'] == str(store.credentials('netease'))
+        assert '续期凭证已刷新' in payload['message']
