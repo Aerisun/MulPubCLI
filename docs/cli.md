@@ -48,7 +48,7 @@ mulpubcli login <platform> [--method qr|sms] [--poll|--confirm|--cookie-file FIL
 mulpubcli login <netease|sohu> --refresh [--phone PHONE] [--password PASS]
 ```
 
-知乎、小红书、今日头条的默认二维码登录会在同一条命令中先输出 `waiting` 和二维码路径，保持进程等待；扫码并通过账号核验后输出 `authenticated`。小红书和头条在二维码失效时返回 `expired`，下次执行 `login` 获取新码；知乎跟随登录页自动换码，并更新同一路径下的图片。已保存且实时核验有效的登录态直接返回 `authenticated`。这三个平台如需清除旧登录态，先执行 `reset <platform>`，再执行 `login <platform>`；`--refresh` 对它们会直接报错。
+知乎、小红书、今日头条的默认二维码登录会在同一条命令中先输出 `waiting` 和二维码路径，保持进程等待；扫码并通过账号核验后输出 `authenticated`。小红书和头条在二维码失效时返回 `expired`，下次执行 `login` 获取新码；知乎跟随登录页自动换码，并更新同一路径下的图片。已保存且实时核验有效的登录态直接返回 `authenticated`。这三个平台如需清除旧登录态，先执行 `reset <platform>`，再执行 `login <platform>`。
 
 知乎使用真实浏览器取得扫码地址，再生成独立的高清二维码 PNG；扫码状态由登录页自行查询，CLI 只监听页面响应，不另发查询请求。小红书和头条使用各自的二维码接口。三者最终都把可发布凭证保存在 `.storage/auth/<platform>.json`。
 
@@ -99,7 +99,7 @@ mulpubcli login xiaohongshu --method sms --confirm  # 输入验证码完成登�
 | `--method sms` | 短信登录（仅小红书） |
 | `--poll` | 兼容旧流程：对小红书或头条的已有二维码只检查一次 |
 | `--confirm` | 输入短信验证码确认（仅 `--method sms`） |
-| `--refresh` | 仅网易、搜狐：自动读取已保存信息并刷新当前账号的续期凭证，无需再次输入；新凭证核验失败时保留旧凭证。其他平台用 `reset` 后重新 `login` |
+| `--refresh` | 仅网易、搜狐的登录命令提供：自动读取已保存信息并刷新当前账号的续期凭证，无需再次输入；新凭证核验失败时保留旧凭证 |
 | `--show-browser` | 搜狐登录显示浏览器窗口以完成人工页面验证，需要图形显示 |
 | `--cookie-file FILE` | 保留参数；当前实现尚未读取该文件，不能用于导入网易号登录态 |
 

@@ -18,7 +18,7 @@ from mulpubcli.platforms.zhihu.client import ZhihuWeb
 from mulpubcli.platforms.zhihu.browser_login import ZhihuBrowserLogin
 from mulpubcli.browser import LoginResult, PlaywrightLoginer
 from mulpubcli.storage import StorageLayout
-from mulpubcli.__main__ import _cmd_login, _cmd_reset, _zhihu_browser_login
+from mulpubcli.__main__ import _build_parser, _cmd_login, _cmd_reset, _zhihu_browser_login
 from mulpubcli.__main__ import _cmd_session
 
 
@@ -75,24 +75,24 @@ class CLIQRLoginTests(unittest.TestCase):
             self.assertFalse(zhihu_profile.exists())
             self.assertTrue((sohu_profile / 'Cookies').exists())
 
-    def test_refresh_is_rejected_for_qr_platforms_without_touching_sessions(self):
-        with TemporaryDirectory() as tmp:
-            store = StorageLayout(Path(tmp))
-            for platform in ('zhihu', 'xiaohongshu', 'toutiao'):
-                with self.subTest(platform=platform):
-                    credential = store.credentials(platform)
-                    credential.write_text('existing', encoding='utf-8')
-                    args = SimpleNamespace(platform=platform, refresh=True, proxy=None)
-                    with patch('mulpubcli.__main__._out') as out, \
-                         patch('mulpubcli.__main__._zhihu_login') as zhihu, \
-                         patch('mulpubcli.__main__._xhs_login') as xhs, \
-                         patch('mulpubcli.__main__._new_client') as new_client:
-                        self.assertEqual(_cmd_login(args, store), 1)
-                    self.assertIn('reset', out.call_args.args[0]['message'])
-                    self.assertEqual(credential.read_text(encoding='utf-8'), 'existing')
-                    zhihu.assert_not_called()
-                    xhs.assert_not_called()
-                    new_client.assert_not_called()
+    def test_refresh_only_exists_for_sohu_and_netease_login(self):
+        parser = _build_parser()
+        for platform in ('zhihu', 'xiaohongshu', 'toutiao'):
+            with self.subTest(platform=platform):
+                with patch('sys.stderr') as stderr, self.assertRaises(SystemExit) as raised:
+                    parser.parse_args(['login', platform, '--refresh'])
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn('unrecognized arguments: --refresh',
+                              ''.join(call.args[0] for call in stderr.write.call_args_list))
+        for platform in ('sohu', 'netease'):
+            with self.subTest(platform=platform):
+                self.assertTrue(parser.parse_args(['login', platform, '--refresh']).refresh)
+
+    def test_existing_login_options_remain_usable_before_platform(self):
+        args = _build_parser().parse_args(['login', '--phone', '13800000000',
+                                           'sohu', '--password', 'secret'])
+        self.assertEqual(args.phone, '13800000000')
+        self.assertEqual(args.password, 'secret')
 
     def test_legacy_toutiao_poll_keeps_waiting_as_successful_check(self):
         with TemporaryDirectory() as tmp:

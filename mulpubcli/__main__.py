@@ -339,10 +339,6 @@ def _probe_account(platform: str, store: StorageLayout, cred_path: Path, *, prox
 def _cmd_login(args, store: StorageLayout) -> int:
     platform = args.platform
     proxy = getattr(args, "proxy", None)
-    if getattr(args, 'refresh', False) and platform not in ('netease', 'sohu'):
-        _out({'status': 'failed', 'platform': platform,
-              'message': f'--refresh 仅用于网易和搜狐刷新续期凭证；{platform} 请先执行 reset {platform}，再执行 login {platform}'})
-        return 1
     # Clean up stale QR codes on every login command
     store.cleanup_stale_qr()
 
@@ -1979,21 +1975,37 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # login
     p_login = sub.add_parser("login", help="登录并核验凭证")
-    p_login.add_argument("platform", choices=PLATFORMS)
-    p_login.add_argument("--method", choices=("qr", "sms"), default="qr", help="登录方式（默认 qr）")
-    grp = p_login.add_mutually_exclusive_group()
-    grp.add_argument("--poll",    action="store_true", help="轮询一次扫码结果")
-    grp.add_argument("--confirm", action="store_true", help="输入短信验证码确认（仅 sms）")
-    grp.add_argument("--cookie-file", metavar="FILE",
-                     help="网易号凭 Cookie 登录的兜底：从浏览器导出的网易 Cookie 文件导入（其他平台忽略）")
-    p_login.add_argument("--refresh", action="store_true",
-                         help="仅网易、搜狐：自动读取已保存信息并刷新当前账号的续期凭证；其他平台请使用 reset")
-    p_login.add_argument("--phone", metavar="PHONE",
-                         help="登录手机号（网易用 NETEASE_PHONE、搜狐用 SOHU_PHONE；成功登录后保存供续期）")
-    p_login.add_argument("--password", metavar="PASS",
-                         help="登录密码（网易用 NETEASE_PASS、搜狐用 SOHU_PASSWORD；成功登录后保存供续期）")
-    p_login.add_argument("--show-browser", action="store_true",
-                         help="搜狐页面要求人工验证码时显示浏览器窗口（须有图形显示）")
+
+    def add_login_options(target: argparse.ArgumentParser, *, before_platform: bool) -> None:
+        # Keep existing common options valid on either side of the platform name.
+        # Child defaults must not overwrite values parsed before the platform.
+        def default(value):
+            return value if before_platform else argparse.SUPPRESS
+
+        target.add_argument("--method", choices=("qr", "sms"), default=default("qr"),
+                            help="登录方式（默认 qr）")
+        group = target.add_mutually_exclusive_group()
+        group.add_argument("--poll", action="store_true", default=default(False),
+                           help="轮询一次扫码结果")
+        group.add_argument("--confirm", action="store_true", default=default(False),
+                           help="输入短信验证码确认（仅 sms）")
+        group.add_argument("--cookie-file", metavar="FILE", default=default(None),
+                           help="网易号凭 Cookie 登录的兜底：从浏览器导出的网易 Cookie 文件导入（其他平台忽略）")
+        target.add_argument("--phone", metavar="PHONE", default=default(None),
+                            help="登录手机号（网易用 NETEASE_PHONE、搜狐用 SOHU_PHONE；成功登录后保存供续期）")
+        target.add_argument("--password", metavar="PASS", default=default(None),
+                            help="登录密码（网易用 NETEASE_PASS、搜狐用 SOHU_PASSWORD；成功登录后保存供续期）")
+        target.add_argument("--show-browser", action="store_true", default=default(False),
+                            help="搜狐页面要求人工验证码时显示浏览器窗口（须有图形显示）")
+
+    add_login_options(p_login, before_platform=True)
+    login_platforms = p_login.add_subparsers(dest="platform", required=True)
+    for platform in PLATFORMS:
+        p_platform = login_platforms.add_parser(platform, help=PLATFORM_NAMES[platform])
+        add_login_options(p_platform, before_platform=False)
+        if platform in ("netease", "sohu"):
+            p_platform.add_argument("--refresh", action="store_true",
+                                    help="自动读取已保存信息并刷新当前账号的续期凭证")
 
     # session
     p_session = sub.add_parser("session", help="实时探测各平台登录态（联网核验凭证有效性）")
