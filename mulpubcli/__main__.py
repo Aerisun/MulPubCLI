@@ -636,13 +636,23 @@ def _sohu_login(args, store: StorageLayout) -> int:
         import getpass
         password = getpass.getpass("请输入搜狐密码（不回显）: ")
 
+    expected_id = ''
+    if saved[0] == phone and cred_path.is_file():
+        try:
+            expected_id = str(json.loads(cred_path.read_text(encoding='utf-8')).get('account_id') or '')
+        except (OSError, ValueError, AttributeError):
+            pass
+
     from .platforms.sohu.login import SohuLogin
 
     try:
         print('[搜狐] 正在打开登录页并核验账号…', file=sys.stderr, flush=True)
-        result = SohuLogin(phone, password, cred_path).run(headless=not show_browser)
+        with session_lock(cred_path):
+            result = SohuLogin(phone, password, cred_path,
+                               account_id=expected_id).run(headless=not show_browser)
+            if result.get('status') == 'ok':
+                _save_login_pair(store, platform, phone, password)
         if result.get('status') == 'ok':
-            _save_login_pair(store, platform, phone, password)
             _out(_login_result(platform, cred_path, info=result,
                                message=result.get('message', '搜狐浏览器登录成功')))
             return 0

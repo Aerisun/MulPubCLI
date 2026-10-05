@@ -1,6 +1,8 @@
 """搜狐号浏览器登录：填账号密码，必要时完成短信验证，再核验并保存凭证。"""
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import select
@@ -11,6 +13,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlsplit
 
 from .client import SohuWeb, MP, USER_AGENT
 from mulpubcli.http import HTTPFailure, save_session
@@ -79,6 +82,51 @@ class SohuLogin:
         self.mirror_port = mirror_port
         self.sms_code_provider = sms_code_provider
         self.cancel_event = cancel_event
+        self._bootstrap_cookies: list[dict] = []
+        self._bootstrap_dv_id = ''
+
+    @staticmethod
+    def _profile_name(phone: str) -> str:
+        """Keep one browser device per phone without exposing the number in its path."""
+        digest = hashlib.sha256(('sohu:' + phone).encode('utf-8')).hexdigest()
+        return 'sohu-' + digest[:20]
+
+    @staticmethod
+    def _bootstrap_from_existing(path: Path, expected_id: str) -> tuple[list[dict], str]:
+        """Only carry current account's unexpired browser state into a new profile."""
+        if not expected_id or path.is_symlink() or not path.is_file():
+            return [], ''
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return [], ''
+        if not isinstance(data, dict) or str(data.get('account_id', '')) != str(expected_id):
+            return [], ''
+        cookies = []
+        now = time.time()
+        for item in data.get('cookies', []):
+            if not isinstance(item, dict):
+                continue
+            name, value, domain = item.get('name'), item.get('value'), item.get('domain')
+            if not all(isinstance(part, str) and part for part in (name, value, domain)):
+                continue
+            if domain.lstrip('.') != 'sohu.com' and not domain.lstrip('.').endswith('.sohu.com'):
+                continue
+            cookie = {'name': name, 'value': value, 'domain': domain,
+                      'path': item.get('path') or '/', 'secure': bool(item.get('secure'))}
+            expiry_value = item.get('expires')
+            if expiry_value is not None:
+                try:
+                    expiry = float(expiry_value)
+                except (TypeError, ValueError):
+                    continue
+                if expiry >= 0:
+                    if expiry <= now:
+                        continue
+                    cookie['expires'] = expiry
+            cookies.append(cookie)
+        dv_id = data.get('dv_id', '')
+        return cookies, dv_id if isinstance(dv_id, str) else ''
 
     def _mirror_ready(self, url: str) -> None:
         """Expose an embeddable URL without handing out cookies or a second session."""
@@ -227,40 +275,69 @@ class SohuLogin:
         return True
 
     @staticmethod
-    def _wait_for_editor_or_auth(page) -> None:
+    def _wait_for_editor_or_auth(page, *, allow_login: bool = False) -> None:
         """等后台编辑器或设备授权页实际出现，再判断下一步。"""
-        page.wait_for_function(
-            "() => location.pathname.includes('/clientAuth') || "
+        condition = (
+            "location.pathname.includes('/clientAuth') || "
             "(location.hostname === 'mp.sohu.com' && "
             "location.pathname.includes('/contentManagement/') && "
             "(document.querySelector('[contenteditable=true]') || "
-            "document.querySelector('input[placeholder*=标题]')))",
-            timeout=20_000)
+            "document.querySelector('input[placeholder*=标题]')))"
+        )
+        if allow_login:
+            condition += (
+                " || (location.hostname.includes('passport.sohu.com') && document.querySelector('.login-button'))"
+                " || (location.hostname === 'mp.sohu.com' && location.pathname === '/')")
+        page.wait_for_function('() => ' + condition, timeout=20_000)
 
     def _perform(self, page, browser, ctx):
         """执行登录自动化。返回 True 表示仍需外部帮助，False 表示已全部完成。"""
         from playwright.sync_api import TimeoutError as PWTimeout
-        # 第一步：填手机号 + 密码并提交。
-        page.fill("input[type=text]:nth-of-type(1)", self.phone)
-        page.fill("input[type=password]:nth-of-type(1)", self.password)
-        button = page.locator(".login-button").first
-        button.wait_for(state='visible', timeout=8000)
-        button.click(timeout=8000)
-        # 页面跳转是登录成功的信号；超时后仍进入后台，由账号接口判定结果。
-        try:
-            page.wait_for_function(
-                "() => !location.href.includes('/fe/login') || "
-                "!document.querySelector('.login-button')",
-                timeout=12_000)
-        except PWTimeout:
-            pass
-        # 进入搜狐号后台；若未授权会被重定向到 clientAuth 授权页。
-        try:
-            page.goto(EDITOR_URL, timeout=50000, wait_until='domcontentloaded')
-            self._wait_for_editor_or_auth(page)
-        except PWTimeout:
-            raise HTTPFailure('搜狐文章编辑页或短信授权页未就绪，登录未完成',
-                              kind='verification_required') from None
+        # 已验证过的浏览器先检查编辑页，避免强制刷新或自动续期时重复密码登录。
+        if self._bootstrap_cookies:
+            if self._bootstrap_dv_id:
+                dv = json.dumps(self._bootstrap_dv_id)
+                page.add_init_script(
+                    "if (location.hostname === 'mp.sohu.com' && "
+                    "!localStorage.getItem('preview-dv-id')) "
+                    f"localStorage.setItem('preview-dv-id', {dv})")
+            page.context.add_cookies(self._bootstrap_cookies)
+        browser_authorized = any(
+            cookie.get('name') == 'mp-cv' and cookie.get('value')
+            for cookie in page.context.cookies())
+        if browser_authorized:
+            try:
+                page.goto(EDITOR_URL, timeout=50000, wait_until='domcontentloaded')
+                self._wait_for_editor_or_auth(page, allow_login=True)
+            except PWTimeout:
+                raise HTTPFailure('搜狐文章编辑页或登录页未就绪，登录未完成',
+                                  kind='verification_required') from None
+            location = urlsplit(page.url or '')
+            browser_authorized = (location.hostname == 'mp.sohu.com' and
+                                  ('/contentManagement/' in location.path or
+                                   '/clientAuth' in location.path))
+
+        if not browser_authorized:
+            if 'passport.sohu.com' not in (page.url or ''):
+                page.goto(LOGIN_URL, timeout=45000, wait_until='domcontentloaded')
+            page.fill("input[type=text]:nth-of-type(1)", self.phone)
+            page.fill("input[type=password]:nth-of-type(1)", self.password)
+            button = page.locator(".login-button").first
+            button.wait_for(state='visible', timeout=8000)
+            button.click(timeout=8000)
+            try:
+                page.wait_for_function(
+                    "() => !location.href.includes('/fe/login') || "
+                    "!document.querySelector('.login-button')",
+                    timeout=12_000)
+            except PWTimeout:
+                pass
+            try:
+                page.goto(EDITOR_URL, timeout=50000, wait_until='domcontentloaded')
+                self._wait_for_editor_or_auth(page)
+            except PWTimeout:
+                raise HTTPFailure('搜狐文章编辑页或短信授权页未就绪，登录未完成',
+                                  kind='verification_required') from None
 
         # 判断是否需真人授权：URL 停在 clientAuth 或页面含"短信验证"字样。
         try:
@@ -331,10 +408,12 @@ class SohuLogin:
         staged.unlink()
         self.destination = staged
         self._headless = headless
+        self._bootstrap_cookies, self._bootstrap_dv_id = self._bootstrap_from_existing(
+            target, self.account_id)
         try:
             loginer = PlaywrightLoginer(user_agent=USER_AGENT,
                                         storage_state_dir=target.parent,
-                                        profile_name=None)
+                                        profile_name=self._profile_name(self.phone))
             result = loginer.login(LOGIN_URL, self._perform, headless=headless,
                                    wait_after_auto_ms=0)
             if result.status != 'ok':
@@ -347,6 +426,9 @@ class SohuLogin:
                 client = SohuWeb.load(staged)
                 try:
                     info = client.account()
+                    if self.account_id and str(info['id']) != str(self.account_id):
+                        return {'status': 'failed', 'platform': 'sohu',
+                                'message': '浏览器登录的搜狐账号与原账号不一致，未替换凭证'}
                     client.save(staged)
                 finally:
                     client.close()
