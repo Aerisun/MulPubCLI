@@ -6,6 +6,7 @@
 """
 import json
 import os
+import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -296,6 +297,34 @@ class HumanDoneTests(unittest.TestCase):
                 done = loginer._human_done(page)
             self.assertFalse(done)
             export.assert_not_called()
+
+
+class CancellationTests(unittest.TestCase):
+    def test_perform_stops_before_browser_work_when_cancelled(self):
+        cancelled = threading.Event()
+        cancelled.set()
+        login = ZhihuBrowserLogin(Path('unused'), cancel_event=cancelled)
+
+        with self.assertRaises(HTTPFailure) as error:
+            login._perform(object(), None, object())
+
+        self.assertEqual(error.exception.kind, 'verification_required')
+
+    def test_wait_for_page_update_stops_if_cancelled_while_waiting(self):
+        cancelled = threading.Event()
+
+        class FakePage:
+            def wait_for_event(self, *args, **kwargs):
+                cancelled.set()
+
+            def wait_for_timeout(self, _ms):
+                pass
+
+        login = ZhihuBrowserLogin(Path('unused'), cancel_event=cancelled)
+        with self.assertRaises(HTTPFailure) as error:
+            login._wait_for_page_update(FakePage(), remaining_ms=1_000)
+
+        self.assertEqual(error.exception.kind, 'verification_required')
 
 
 class CliBrowserLoginTests(unittest.TestCase):

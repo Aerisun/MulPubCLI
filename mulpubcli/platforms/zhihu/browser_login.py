@@ -6,6 +6,7 @@ import io
 import os
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -30,7 +31,8 @@ class ZhihuBrowserLogin:
     """驱动一次浏览器扫码登录，导出 Cookie 为凭证。"""
 
     def __init__(self, destination, *, on_human_needed=None, headless=True,
-                 max_wait_ms=QR_LOGIN_MAX_WAIT_MS, qr_path=None, proxy=None):
+                 max_wait_ms=QR_LOGIN_MAX_WAIT_MS, qr_path=None, proxy=None,
+                 cancel_event: threading.Event | None = None):
         if not isinstance(destination, Path):
             destination = Path(destination)
         self.destination = destination
@@ -43,8 +45,13 @@ class ZhihuBrowserLogin:
                                QR_LOGIN_MAX_WAIT_MS)
         self.qr_path = Path(qr_path) if qr_path else None
         self.proxy = proxy
+        self.cancel_event = cancel_event
         self.account_id = ''
         self._qr_digest = None
+
+    def _check_cancelled(self) -> None:
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise HTTPFailure('知乎登录已取消', kind='verification_required')
 
     # ── 登录态判定 ──────────────────────────────────────────────
     def _has_login_cookie(self, ctx) -> bool:
@@ -166,16 +173,38 @@ class ZhihuBrowserLogin:
     # ── perform 回调（PlaywrightLoginer 复用） ──────────────────
     def _perform(self, page, browser, ctx):
         """登录页已加载：已登录则直接导出；否则等待二维码画布就绪。"""
+        self._check_cancelled()
         if self._has_login_cookie(ctx):
             self._export(ctx)
             return False              # 已完成，无需真人
         if self.qr_path:
             self.qr_path.unlink(missing_ok=True)
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-        try:
-            canvas = page.wait_for_selector('canvas.Qrcode-qrcode', state='visible',
-                                            timeout=15_000)
-        except PlaywrightTimeoutError:
+        if self.cancel_event is None:
+            try:
+                canvas = page.wait_for_selector(
+                    'canvas.Qrcode-qrcode', state='visible', timeout=15_000
+                )
+            except PlaywrightTimeoutError:
+                canvas = None
+        else:
+            deadline = time.monotonic() + 15
+            canvas = None
+            while canvas is None and time.monotonic() < deadline:
+                self._check_cancelled()
+                remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+                try:
+                    canvas = page.wait_for_selector(
+                        'canvas.Qrcode-qrcode',
+                        state='visible',
+                        timeout=min(1000, remaining_ms),
+                    )
+                except PlaywrightTimeoutError:
+                    if self._has_login_cookie(ctx):
+                        self._export(ctx)
+                        return False
+        self._check_cancelled()
+        if canvas is None:
             if self._has_login_cookie(ctx):
                 self._export(ctx)
                 return False
@@ -198,6 +227,7 @@ class ZhihuBrowserLogin:
 
         由页面自身的扫码状态响应触发；二维码自动换码时更新独立图片。
         """
+        self._check_cancelled()
         if self._has_login_cookie(page.context):
             self._export(page.context)   # 登录完成，导出凭证
             return True
@@ -220,6 +250,7 @@ class ZhihuBrowserLogin:
 
     def _wait_for_page_update(self, page, remaining_ms: int | None) -> None:
         """Listen to Zhihu's own QR requests; this method sends no requests."""
+        self._check_cancelled()
         from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
         started = time.monotonic()
         try:
@@ -237,6 +268,7 @@ class ZhihuBrowserLogin:
             pass
         except PlaywrightError:
             raise HTTPFailure('知乎登录页已关闭或无法继续等待', kind='http_error') from None
+        self._check_cancelled()
 
     def run(self) -> dict:
         """执行知乎浏览器登录（自动抠码并被动等待扫码），返回结果摘要。"""
