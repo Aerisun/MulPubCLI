@@ -14,9 +14,9 @@ from urllib.parse import urljoin, urlsplit
 
 from PIL import Image
 
-from mulpubcli.core import Article, PublishResult, content_fingerprint, content_matches, strip_markdown_images
+from mulpubcli.core import Article, PublishResult, content_fingerprint, content_matches
 from mulpubcli.http import HTTP, HTTPFailure, iter_cookies, load_session, save_session
-from mulpubcli.renderer import render as _render_article, _ArticleHTML
+from mulpubcli.renderer import render as _render_article, _ArticleHTML, plain_markdown_text
 
 
 PLATFORM = 'toutiao'
@@ -483,7 +483,7 @@ class ToutiaoWeb:
         if expected is not None:
             # 渲染后正文只保留可见文本与独立配图，markdown 图片语法不进入内容；
             # 与小红书一致，指纹须基于剥离图片语法后的正文计算。
-            proof.update(content_fingerprint(PLATFORM, expected.title, strip_markdown_images(expected.body)))
+            proof.update(content_fingerprint(PLATFORM, expected.title, plain_markdown_text(expected.body)))
         item = self.find_article(article_id, draft=draft)
         if not item:
             try:

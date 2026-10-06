@@ -19,7 +19,7 @@ def test_publish_reports_saved_article_identity(
         tmp_path, monkeypatch, capsys, platform, remote_id):
     (tmp_path / "cover.jpg").write_bytes(b"cover")
     source = tmp_path / "article.md"
-    source.write_text("# 测试标题\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
+    source.write_text("<!-- title: 测试标题 -->\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
     article = Article.load(source)
     store = StorageLayout(tmp_path)
 
@@ -50,7 +50,7 @@ def test_publish_parser_does_not_accept_force_option(capsys):
 def test_publish_resubmits_existing_article_and_keeps_common_fields(tmp_path, monkeypatch, capsys):
     (tmp_path / "cover.jpg").write_bytes(b"cover")
     source = tmp_path / "article.md"
-    source.write_text("# 标题\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
+    source.write_text("<!-- title: 标题 -->\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
     store = StorageLayout(tmp_path)
     article = Article.load(source)
     ledger = ResultLedger(store.results_dir)
@@ -78,7 +78,7 @@ def test_publish_resubmits_existing_article_and_keeps_common_fields(tmp_path, mo
     assert "id" in submitted and "verification" in submitted and "url" in submitted
 
     invalid = tmp_path / "invalid.md"
-    invalid.write_text("# 标题\n正文，没有封面。", encoding="utf-8")
+    invalid.write_text("<!-- title: 标题 -->\n正文，没有封面。", encoding="utf-8")
     args.article = str(invalid)
     assert cli._cmd_publish(args, store) == 2
     failed = json.loads(capsys.readouterr().out)

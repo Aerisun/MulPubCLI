@@ -14,8 +14,8 @@ mulpubcli list
 
 ## 文档
 
-- [CLI 手册](docs/cli.md)：安装、登录、发布、草稿、列表和核验命令。
-- [图文发布说明](docs/publishing.md)：稿件格式、图片上传及各平台处理方式。
+- [CLI 手册](docs/cli.md)：安装、登录、发布、列表和核验命令。
+- [图文发布说明](docs/publishing.md)：稿件格式、各平台 Markdown 语法支持范围、图片上传及发布处理方式。
 
 ## 项目结构
 

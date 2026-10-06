@@ -20,9 +20,9 @@ from urllib.parse import urlsplit
 
 from PIL import Image
 
-from mulpubcli.core import Article, PublishResult, content_fingerprint, content_matches, strip_markdown_images
+from mulpubcli.core import Article, PublishResult, content_fingerprint, content_matches
 from mulpubcli.http import HTTP, HTTPFailure, iter_cookies, load_session, save_session
-from mulpubcli.renderer import render as _render_article, _ArticleHTML
+from mulpubcli.renderer import render as _render_article, _ArticleHTML, plain_markdown_text
 
 
 PLATFORM = 'sohu'
@@ -364,7 +364,7 @@ class SohuWeb:
             return PublishResult('pending', '搜狐列表标题与原稿不一致', url, PLATFORM, 'mismatch')
         proof = dict(evidence or {})
         if expected is not None:
-            proof.update(content_fingerprint(PLATFORM, expected.title, strip_markdown_images(expected.body)))
+            proof.update(content_fingerprint(PLATFORM, expected.title, plain_markdown_text(expected.body)))
         if proof.get('sha256'):
             response = self.http.request('GET', DETAIL_API, params={'newsId': article_id,
                                                                      'accountId': self.account_id},

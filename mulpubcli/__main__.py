@@ -5,7 +5,6 @@
   mulpubcli session [<platform>]        # 实时探测各平台登录态（联网核验）
   mulpubcli reset   <platform>          # 清理登录状态后重新登录
   mulpubcli publish <platform> --article FILE
-  mulpubcli draft   <platform> --article FILE
   mulpubcli verify  [--id ARTICLE_ID | --platform <platform>] [--json]
   mulpubcli status  [--platform <platform>]
   mulpubcli list    [<platform>] [--json]  # 本工具发布文章的跟踪列表
@@ -39,7 +38,6 @@ PLATFORM_NAMES = {"xiaohongshu": "小红书", "zhihu": "知乎", "toutiao": "今
                   "netease": "网易号", "sohu": "搜狐号"}
 DISPLAY_TZ = ZoneInfo('Asia/Shanghai')
 PUBLICATION_PLATFORMS = PLATFORMS
-DRAFT_PLATFORMS = ("zhihu", "toutiao", "netease")
 READBACK_PLATFORMS = PLATFORMS
 
 # ─────────────────────────────────────────────
@@ -775,15 +773,9 @@ def _probe_credential(platform: str, store: StorageLayout, *, proxy: str | None 
         else:
             info = client.account()           # 返回 {id, user_id|name,...}
             identity = {k: info[k] for k in ("id", "user_id") if info.get(k)}
-        try:
-            metadata = json.loads(path.read_text(encoding='utf-8'))
-        except (OSError, ValueError):
-            metadata = {}
-        return {"status": "authenticated", "credential_path": str(path),
-                "message": "登录态实时核验有效", **identity,
-                "username": metadata.get('username') or (info.get('name') if platform != 'xiaohongshu' else None),
-                "expires_at": metadata.get('expires_at'),
-                "cookie_expirations": metadata.get('cookie_expirations', {})}
+        return {**_login_result(platform, path, message='登录态实时核验有效',
+                                info=info if platform != 'xiaohongshu' else None),
+                **identity}
     except HTTPFailure as exc:
         if exc.kind in ("authentication_required", "platform_rejected", "verification_required",
                         "account_setup_required", "account_mismatch"):
@@ -1419,20 +1411,16 @@ def _netease_browser_publish(article: Article, store: StorageLayout) -> PublishR
                          platform="netease")
 
 
-def _do_publish(platform: str, article: Article, store: StorageLayout, draft: bool = False, *,
+def _do_publish(platform: str, article: Article, store: StorageLayout, *,
                 proxy: str | None = None, declaration: str = 'none') -> PublishResult:
     client = _load_client(platform, store, proxy=proxy)
     ledger = ResultLedger(store.results_dir)
     checkpoint = lambda stage, remote_id: ledger.checkpoint(platform, article, stage, remote_id)
     try:
-        if platform == 'sohu' and not draft:
+        if platform == 'sohu':
             return client.publish(article, checkpoint=checkpoint, declaration=declaration)
         if platform == 'toutiao':
-            return client.publish(article, checkpoint=checkpoint, public=not draft)
-        if draft:
-            if not hasattr(client, "draft"):
-                return PublishResult("failed", f"{platform} 暂不支持草稿模式", platform=platform)
-            return client.draft(article, checkpoint=checkpoint)
+            return client.publish(article, checkpoint=checkpoint, public=True)
         if platform == "netease":
             # 公开发布要走真实编辑器的受保护提交（瞬时浏览器），纯 HTTP 直发会被风控受限。
             from .platforms.netease.client import daily_quota_reason
@@ -1448,15 +1436,11 @@ def _do_publish(platform: str, article: Article, store: StorageLayout, draft: bo
         _close(client)
 
 
-def _cmd_publish(args, store: StorageLayout, draft: bool = False) -> int:
+def _cmd_publish(args, store: StorageLayout) -> int:
     platform = args.platform
-    verb = "存为草稿" if draft else "发布"
 
-    supported = DRAFT_PLATFORMS if draft else PUBLICATION_PLATFORMS
-    if platform not in supported:
-        message = (f"{platform} 暂不支持草稿" if draft else
-                   f"{platform} 图文公开发布接口尚未接入；可使用 draft 保存草稿")
-        _out_result(PublishResult("failed", message, platform=platform,
+    if platform not in PUBLICATION_PLATFORMS:
+        _out_result(PublishResult("failed", f"{platform} 图文公开发布接口尚未接入", platform=platform,
                                   verification="unsupported"))
         return 2
     declaration = getattr(args, 'declaration', 'none')
@@ -1471,8 +1455,7 @@ def _cmd_publish(args, store: StorageLayout, draft: bool = False) -> int:
         _out_result(PublishResult('failed', str(exc), platform=platform))
         return 2
 
-    if (platform == "xiaohongshu" or (platform == "netease" and not draft)) \
-            and remote_body_images(article.body):
+    if platform in ("xiaohongshu", "netease") and remote_body_images(article.body):
         _out_result(PublishResult('failed', '该发布方式不支持正文远程图片；请先改为本地图片路径',
                                   platform=platform), title=article.title)
         return 2
@@ -1485,7 +1468,7 @@ def _cmd_publish(args, store: StorageLayout, draft: bool = False) -> int:
         return 2
 
     try:
-        result = _do_publish(platform, article, store, draft=draft,
+        result = _do_publish(platform, article, store,
                              proxy=getattr(args, "proxy", None), declaration=declaration)
     except HTTPFailure as exc:
         status = 'failed' if exc.kind in ('authentication_required', 'verification_required',
@@ -1494,12 +1477,12 @@ def _cmd_publish(args, store: StorageLayout, draft: bool = False) -> int:
     except (FileNotFoundError, PermissionError) as exc:
         result = PublishResult("failed", str(exc), platform=platform)
     except Exception as exc:
-        result = PublishResult("pending", f"{verb}过程异常，请核验：{type(exc).__name__}", platform=platform)
+        result = PublishResult("pending", f"发布过程异常，请核验：{type(exc).__name__}", platform=platform)
 
     saved = ledger.save(platform, article, result)
     record = json.loads(saved.read_text(encoding="utf-8"))
     _out_result(result, article_id=record.get("remote_id"), title=article.title)
-    return 0 if result.status in ("published", "draft") else 1
+    return 0 if result.status == "published" else 1
 
 
 # ─────────────────────────────────────────────
@@ -1947,7 +1930,7 @@ def _cmd_storage(args, store: StorageLayout) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mulpubcli",
-        description="小红书 / 知乎 / 今日头条 / 网易号  HTTP 原生自动化发布 CLI",
+        description="小红书 / 知乎 / 今日头条 / 网易号 / 搜狐号 HTTP 原生自动化发布 CLI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
@@ -2018,13 +2001,9 @@ def _build_parser() -> argparse.ArgumentParser:
     # publish
     p_pub = sub.add_parser("publish", help="发布文章（正式公开）")
     p_pub.add_argument("platform", choices=PLATFORMS)
-    p_pub.add_argument("--article", required=True, help="Markdown 稿件路径（第一行为 # 标题，封面用 <!-- cover: 路径 --> 指令）")
+    p_pub.add_argument("--article", required=True, help="Markdown 稿件路径（第一行为 <!-- title: 标题 -->，封面用 <!-- cover: 路径 --> 指令）")
     p_pub.add_argument("--declaration", choices=("none", "fiction", "ai", "marketing", "reprint", "opinion"),
                        default="none", help="搜狐创作声明；默认 none（无需声明）")
-    p_draft = sub.add_parser("draft", help="保存草稿（不公开发表）")
-    p_draft.add_argument("platform", choices=PLATFORMS, metavar="PLATFORM",
-                         help="仅支持 zhihu、toutiao、netease；其他平台返回 unsupported")
-    p_draft.add_argument("--article", required=True, help="Markdown 稿件路径（封面用 <!-- cover: 路径 --> 指令）")
     # verify
     p_ver = sub.add_parser("verify", help="回查文章在线状态：--id 查单篇；--platform 回查该平台正在跟踪的文章")
     p_ver.add_argument("--id", help="文章 ID（全局唯一，无需同时传 --platform，自动识别所属平台）")
@@ -2063,8 +2042,7 @@ def main(argv: list[str] | None = None) -> int:
         "login":   lambda a: _cmd_login(a, store),
         "session": lambda a: _cmd_session(a, store),
         "reset":   lambda a: _cmd_reset(a, store),
-        "publish": lambda a: _cmd_publish(a, store, draft=False),
-        "draft":   lambda a: _cmd_publish(a, store, draft=True),
+        "publish": lambda a: _cmd_publish(a, store),
         "verify":  lambda a: _cmd_verify(a, store),
         "status":  lambda a: _cmd_status(a, store),
         "list":    lambda a: _cmd_list(a, store),

@@ -29,13 +29,13 @@ mulpubcli [--root DIR] [--proxy URL] <command> ...
 
 ## 支持平台
 
-| 平台参数 | 平台名称 | `publish` | `draft` | `list` / `verify` |
-|---------|---------|-----------|---------|-------------------|
-| `xiaohongshu` | 小红书 | 支持 | 不支持 | 支持 |
-| `zhihu` | 知乎 | 支持 | 支持 | 支持 |
-| `toutiao` | 今日头条 | 支持 | 支持 | 支持 |
-| `netease` | 网易号 | 支持 | 支持 | 支持 |
-| `sohu` | 搜狐号 | 支持图文直接投稿 | 不作为对外命令 | 支持 |
+| 平台参数 | 平台名称 | `publish` | `list` / `verify` |
+|---------|---------|-----------|-------------------|
+| `xiaohongshu` | 小红书 | 支持 | 支持 |
+| `zhihu` | 知乎 | 支持 | 支持 |
+| `toutiao` | 今日头条 | 支持 | 支持 |
+| `netease` | 网易号 | 支持 | 支持 |
+| `sohu` | 搜狐号 | 支持图文直接投稿 | 支持 |
 
 不支持的操作会返回 `status: failed` 和 `verification: unsupported`，不会提交到平台。
 
@@ -132,7 +132,7 @@ mulpubcli session          # 查看全部平台
 mulpubcli session zhihu    # 只看知乎
 ```
 
-每个平台做一次轻量已认证探测（小红书读发布状态接口，知乎 / 头条查账号信息），返回 `status`：
+每个平台做一次轻量已认证探测（小红书读创作者作品列表，其余平台查账号信息），返回 `status`。认证成功时同时返回与 `login` 一致的账号摘要，以及凭证里各 Cookie 的实际到期时间；会话 Cookie 没有固定到期属性时显示 `null`。
 
 | status | 含义 |
 |--------|------|
@@ -162,7 +162,7 @@ mulpubcli reset zhihu
 mulpubcli publish <platform> --article FILE [--declaration VALUE]
 ```
 
-直接提交公开投稿请求。平台可能需要审核，提交成功不等于已经公开可见。包含以下步骤：
+执行正式发布；网易号先在浏览器编辑器中确认草稿保存成功，再点击发布。平台可能需要审核，提交成功不等于已经公开可见。包含以下步骤：
 1. 验证账号登录态
 2. 上传封面图
 3. 上传正文中引用的所有本地图片
@@ -184,12 +184,12 @@ mulpubcli publish sohu --article article.md --declaration fiction
 
 | 选项 | 说明 |
 |------|------|
-| `--article FILE` | Markdown 稿件路径（第一行为 `# 标题`，封面用 `<!-- cover: 路径 -->` 指令） |
+| `--article FILE` | Markdown 稿件路径（第一行为 `<!-- title: 标题 -->`，封面用 `<!-- cover: 路径 -->` 指令；正文语法支持范围见[发布图文说明](publishing.md#正文-markdown-支持范围)） |
 | `--declaration` | 仅搜狐：`none`（无需声明，默认）、`fiction`（虚构演绎）、`ai`（AI 生成）、`marketing`（营销）、`reprint`（转载）、`opinion`（个人观点） |
 
 搜狐 `publish` 直接请求当前编辑器使用的图文公开投稿接口，不经草稿接口。搜狐账号无图文发布资格时，平台会拒绝投稿；CLI 会保留拒绝原因。本轮只验证了接口结构和只读列表，没有执行真实公开投稿。
 
-发布和存稿输出统一包含 `platform`、`id`、`title`、`status`、`message`、`url`、`verification`。`id` 是平台文章 ID；在平台未返回 ID 时为 `null`。`url` 只有在取得可核验链接时才提供。
+发布输出统一包含 `platform`、`id`、`title`、`status`、`message`、`url`、`verification`。`id` 是平台文章 ID；在平台未返回 ID 时为 `null`。`url` 只有在取得可核验链接时才提供。
 
 **输出状态说明：**
 
@@ -200,22 +200,6 @@ mulpubcli publish sohu --article article.md --declaration fiction
 | `failed` | 投稿前失败或被平台明确拒绝，原因见 `message` |
 
 → 详见 [docs/publishing.md](publishing.md)
-
----
-
-## draft — 保存草稿
-
-```
-mulpubcli draft <platform> --article FILE
-```
-
-支持 `zhihu`、`toutiao` 和 `netease`。流程与 publish 相同，但结果为草稿（不公开发布）。搜狐使用 `publish sohu` 直接投稿。
-
-```bash
-mulpubcli draft zhihu --article article.md
-mulpubcli draft toutiao --article article.md
-mulpubcli draft netease --article article.md
-```
 
 ---
 
@@ -234,7 +218,7 @@ mulpubcli list sohu                 # 搜狐图文及审核状态
 mulpubcli list --json              # 输出原始 JSON，供机器使用
 ```
 
-表格列：发布时间 / 平台 / 标题 / 编号 / 状态 / 链接 / 核验说明。平台显示中文名，时间按北京时间显示，兼容秒、毫秒、微秒时间戳。编号优先显示平台文章 ID，尚未取得时显示本地 `tracking_id`。`--json` 每篇文章有 `id`、`tracking_id`、`url`、`status`；平台键仍是英文命令参数。无法确认的项目会有 `check`。小红书需要平台提供的分享令牌才能生成可靠的直达链接；缺少令牌时 `url` 为 `null` 并解释原因。网易和知乎草稿返回编辑页链接；头条只有拿到公开 `item_id` 才返回公开文章链接。
+表格列：发布时间 / 平台 / 标题 / 编号 / 状态 / 链接 / 核验说明。平台显示中文名，时间按北京时间显示，兼容秒、毫秒、微秒时间戳。编号优先显示平台文章 ID，尚未取得时显示本地 `tracking_id`。`--json` 每篇文章有 `id`、`tracking_id`、`url`、`status`；平台键仍是英文命令参数。无法确认的项目会有 `check`。小红书需要平台提供的分享令牌才能生成可靠的直达链接；缺少令牌时 `url` 为 `null` 并解释原因。发布过程中若形成草稿，网易和知乎可返回编辑页链接；头条只有拿到公开 `item_id` 才返回公开文章链接。
 
 ## list-delete — 取消跟踪
 

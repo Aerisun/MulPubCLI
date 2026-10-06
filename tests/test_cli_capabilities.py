@@ -15,7 +15,7 @@ from mulpubcli.storage import StorageLayout
 def _article(tmp_path):
     (tmp_path / "cover.jpg").write_bytes(b"cover")
     path = tmp_path / "article.md"
-    path.write_text("# 测试标题\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
+    path.write_text("<!-- title: 测试标题 -->\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
     return path, Article.load(path)
 
 
@@ -369,28 +369,17 @@ def test_sohu_public_url_recovers_only_the_article_id():
     assert ResultLedger._id_from_url("sohu", "https://www.sohu.com/a/42_456") == "42"
 
 
-@pytest.mark.parametrize("platform", ["xiaohongshu", "sohu"])
-def test_unsupported_draft_uses_the_same_json_result(tmp_path, capsys, platform):
-    path, _ = _article(tmp_path)
-    code = cli.main(["--root", str(tmp_path), "draft", platform, "--article", str(path)])
-    assert code == 2
-    result = json.loads(capsys.readouterr().out)
-    assert result["platform"] == platform
-    assert result["status"] == "failed"
-    assert result["verification"] == "unsupported"
+def test_draft_is_not_a_cli_command(capsys):
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["draft", "zhihu", "--article", "article.md"])
+    assert raised.value.code == 2
+    assert "invalid choice: 'draft'" in capsys.readouterr().err
 
 
 def test_publish_help_does_not_offer_unused_urs_token(capsys):
     with pytest.raises(SystemExit):
         cli.main(["publish", "--help"])
     assert "--urs-token" not in capsys.readouterr().out
-
-
-def test_draft_help_names_the_supported_platforms(capsys):
-    with pytest.raises(SystemExit):
-        cli.main(["draft", "--help"])
-    help_text = capsys.readouterr().out
-    assert "仅支持 zhihu、toutiao、netease" in help_text
 
 
 def test_zhihu_draft_saves_and_reports_the_remote_id_without_publishing(tmp_path):

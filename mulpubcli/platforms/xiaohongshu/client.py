@@ -14,7 +14,8 @@ from urllib.parse import urlencode, urlsplit
 
 from PIL import Image
 
-from mulpubcli.core import Article, PublishResult, content_fingerprint, content_matches, strip_markdown_images
+from mulpubcli.core import Article, PublishResult, content_fingerprint, content_matches
+from mulpubcli.renderer import plain_markdown_text
 from mulpubcli.http import HTTP, HTTPFailure, private_json
 from .session import SIGNER_REV, load_source, restore_profile, dump_profile
 from .signing import creator_params
@@ -51,7 +52,7 @@ def image_payload(article: Article, images: list[dict]) -> dict:
              'noteCopyBind': {'copyable': True}, 'interactionPermissionBind': {'commentPermission': 0},
              'optionRelationList': []}
     return {'common': {
-        'type': 'normal', 'title': article.title, 'desc': strip_markdown_images(article.body), 'note_id': '',
+        'type': 'normal', 'title': article.title, 'desc': plain_markdown_text(article.body), 'note_id': '',
         'source': json.dumps({'type': 'web', 'ids': '', 'extraInfo': json.dumps({'subType': 'official', 'systemId': 'web'})}),
         'business_binds': json.dumps(binds, separators=(',', ':')), 'ats': [], 'hash_tag': [],
         'privacy_info': {'op_type': 1, 'type': 0, 'user_ids': []}, 'goods_info': {}, 'biz_relations': [],
@@ -235,7 +236,7 @@ class XHSHTTP:
             raise ValueError('小红书笔记 ID 无效')
         evidence = dict(evidence or {})
         if expected is not None:
-            evidence.update(content_fingerprint('xiaohongshu', expected.title, strip_markdown_images(expected.body)))
+            evidence.update(content_fingerprint('xiaohongshu', expected.title, plain_markdown_text(expected.body)))
             evidence['media_pixels'] = [pixel_fingerprint(path) for path in expected.all_images()]
             evidence['media_profiles'] = [image_profile(path) for path in expected.all_images()]
         url = None
@@ -355,7 +356,7 @@ class XHSHTTP:
                 'pixel_sha256': pixel_fingerprint(path), 'profile': [width, height, len(data)]}
 
     def publish(self, article: Article, *, checkpoint=None) -> PublishResult:
-        if len(article.title) > 20 or len(article.body) > 1000:
+        if len(article.title) > 20 or len(plain_markdown_text(article.body)) > 1000:
             return PublishResult('failed', '小红书普通图文限标题 20 字、正文 1000 字；请改稿，不会自动截断', platform='xiaohongshu')
         uploads: list[dict] = []
         try:

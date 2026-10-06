@@ -21,7 +21,7 @@ from mulpubcli.storage import StorageLayout
 def _article(tmp_path: Path) -> Article:
     (tmp_path / "cover.jpg").write_bytes(b"cover")
     path = tmp_path / "article.md"
-    path.write_text("# 测试文章\n\n<!-- cover: cover.jpg -->\n\n正文。", encoding="utf-8")
+    path.write_text("<!-- title: 测试文章 -->\n\n<!-- cover: cover.jpg -->\n\n正文。", encoding="utf-8")
     return Article.load(path)
 
 
@@ -192,7 +192,7 @@ def test_xhs_image_proof_survives_checkpoint_and_later_recheck(tmp_path):
 def test_verification_hash_uses_published_body_without_markdown_images(tmp_path):
     (tmp_path / "body.jpg").write_bytes(b"image")
     (tmp_path / "article.md").write_text(
-        "# 测试文章\n<!-- cover: cover.jpg -->\n正文前。\n![图](body.jpg)\n正文后。")
+        "<!-- title: 测试文章 -->\n<!-- cover: cover.jpg -->\n正文前。\n![图](body.jpg)\n正文后。")
     (tmp_path / "cover.jpg").write_bytes(b"cover")
     article = Article.load(tmp_path / "article.md")
     ledger = ResultLedger(StorageLayout(tmp_path).results_dir)
@@ -467,7 +467,7 @@ def test_toutiao_content_mismatch_still_returns_article_link():
 def test_toutiao_checkpoints_cover_and_body_media(tmp_path):
     (tmp_path / "body.jpg").write_bytes(b"image")
     (tmp_path / "article.md").write_text(
-        "# 测试文章\n<!-- cover: cover.jpg -->\n正文。\n![图](body.jpg)")
+        "<!-- title: 测试文章 -->\n<!-- cover: cover.jpg -->\n正文。\n![图](body.jpg)")
     (tmp_path / "cover.jpg").write_bytes(b"cover")
     article = Article.load(tmp_path / "article.md")
     client = ToutiaoWeb.__new__(ToutiaoWeb)
@@ -488,7 +488,7 @@ def test_toutiao_checkpoints_cover_and_body_media(tmp_path):
 def test_xhs_checkpoints_cover_and_body_media(tmp_path):
     (tmp_path / "body.jpg").write_bytes(b"image")
     (tmp_path / "article.md").write_text(
-        "# 测试文章\n<!-- cover: cover.jpg -->\n正文。\n![图](body.jpg)")
+        "<!-- title: 测试文章 -->\n<!-- cover: cover.jpg -->\n正文。\n![图](body.jpg)")
     (tmp_path / "cover.jpg").write_bytes(b"cover")
     article = Article.load(tmp_path / "article.md")
     client = XHSHTTP.__new__(XHSHTTP)

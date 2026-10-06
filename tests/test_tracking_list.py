@@ -186,7 +186,7 @@ def test_list_delete_rejects_ambiguous_remote_id_and_accepts_local_tracking_id(t
 
 def test_untracking_hides_record_without_deleting_its_history(tmp_path):
     (tmp_path / "cover.jpg").write_bytes(b"cover")
-    (tmp_path / "article.md").write_text("# 测试标题\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
+    (tmp_path / "article.md").write_text("<!-- title: 测试标题 -->\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
     article = Article.load(tmp_path / "article.md")
     store = StorageLayout(tmp_path)
     ledger = ResultLedger(store.results_dir)
@@ -205,7 +205,7 @@ def test_untracking_hides_record_without_deleting_its_history(tmp_path):
 def test_failed_repeat_keeps_previous_published_article_in_list(tmp_path, monkeypatch, capsys):
     (tmp_path / "cover.jpg").write_bytes(b"cover")
     source = tmp_path / "article.md"
-    source.write_text("# 测试标题\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
+    source.write_text("<!-- title: 测试标题 -->\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
     article = Article.load(source)
     store = StorageLayout(tmp_path)
     ledger = ResultLedger(store.results_dir)
@@ -230,7 +230,7 @@ def test_failed_repeat_keeps_previous_published_article_in_list(tmp_path, monkey
 def test_repeat_after_failed_attempt_submits_again(tmp_path, monkeypatch, capsys):
     (tmp_path / "cover.jpg").write_bytes(b"cover")
     source = tmp_path / "article.md"
-    source.write_text("# 测试标题\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
+    source.write_text("<!-- title: 测试标题 -->\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
     article = Article.load(source)
     store = StorageLayout(tmp_path)
     ledger = ResultLedger(store.results_dir)
@@ -263,7 +263,7 @@ def test_repeat_after_failed_attempt_submits_again(tmp_path, monkeypatch, capsys
 def test_second_publication_tracks_both_remote_article_ids(tmp_path, monkeypatch):
     (tmp_path / "cover.jpg").write_bytes(b"cover")
     source = tmp_path / "article.md"
-    source.write_text("# 测试标题\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
+    source.write_text("<!-- title: 测试标题 -->\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
     article = Article.load(source)
     store = StorageLayout(tmp_path)
     ledger = ResultLedger(store.results_dir)

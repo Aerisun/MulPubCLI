@@ -33,6 +33,13 @@ from .core import Article
 from .http import HTTPFailure
 
 _MD_IMG_RE = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
+_INLINE_RE = re.compile(
+    r'!\[([^\]]*)\]\(([^)]+)\)'
+    r'|\[([^\]]+)\]\((https?://[^)]+)\)'
+    r'|`([^`]+)`|\*\*(.+?)\*\*|~~(.+?)~~|\*([^*\n]+)\*'
+)
+_HEADING_RE = re.compile(r'^(#{1,6})\s+(.+)$')
+_LIST_RE = re.compile(r'^\s*(?:([-*+])\s+|(\d+)\.\s+)(.+)$')
 
 
 class _ArticleHTML(HTMLParser):
@@ -186,32 +193,76 @@ def _render_body(body: str, image_map: dict[str, str], *, base_dir: Path | None 
             paragraph.clear()
 
     def _render_inline(line: str) -> str:
-        """Escape text and substitute image tags within a single line."""
+        """Render the supported inline Markdown without accepting raw HTML."""
         result = []
         last = 0
-        for m in _MD_IMG_RE.finditer(line):
-            # Escape text before this image
+        for m in _INLINE_RE.finditer(line):
             before = escape(line[last:m.start()])
             if before:
                 result.append(before)
-            alt, src = m.group(1), m.group(2)
-            url = _resolve_src(src, image_map, base_dir=base_dir)
-            if url:
-                result.append(f'<img src="{escape(url, quote=True)}" alt="{escape(alt)}">')
-            # If no URL for local image, drop it silently
+            if m.group(1) is not None:
+                alt, src = m.group(1), m.group(2)
+                url = _resolve_src(src, image_map, base_dir=base_dir)
+                if url:
+                    result.append(f'<img src="{escape(url, quote=True)}" alt="{escape(alt)}">')
+            elif m.group(3) is not None:
+                label, url = m.group(3), m.group(4)
+                result.append(f'<a href="{escape(url, quote=True)}">{_render_inline(label)}</a>')
+            elif m.group(5) is not None:
+                result.append(f'<code>{escape(m.group(5))}</code>')
+            elif m.group(6) is not None:
+                result.append(f'<strong>{_render_inline(m.group(6))}</strong>')
+            elif m.group(7) is not None:
+                result.append(f'<del>{_render_inline(m.group(7))}</del>')
+            else:
+                result.append(f'<em>{_render_inline(m.group(8))}</em>')
             last = m.end()
-        # Remaining text after last image
         tail = escape(line[last:])
         if tail:
             result.append(tail)
         return "".join(result)
 
-    for raw_line in body.splitlines():
+    lines = body.splitlines()
+    i = 0
+    while i < len(lines):
+        raw_line = lines[i]
         stripped = raw_line.strip()
+        i += 1
 
         # Blank line → end current paragraph
         if not stripped:
             _flush_paragraph()
+            continue
+
+        heading = _HEADING_RE.fullmatch(stripped)
+        if heading:
+            _flush_paragraph()
+            level = len(heading.group(1))
+            parts.append(f'<h{level}>{_render_inline(heading.group(2))}</h{level}>')
+            continue
+
+        if stripped.startswith('> '):
+            _flush_paragraph()
+            quoted = [stripped[2:]]
+            while i < len(lines) and lines[i].strip().startswith('> '):
+                quoted.append(lines[i].strip()[2:])
+                i += 1
+            parts.append('<blockquote><p>' + '<br>'.join(_render_inline(s) for s in quoted) + '</p></blockquote>')
+            continue
+
+        item = _LIST_RE.fullmatch(stripped)
+        if item:
+            _flush_paragraph()
+            ordered = item.group(2) is not None
+            tag = 'ol' if ordered else 'ul'
+            items = [_render_inline(item.group(3))]
+            while i < len(lines):
+                next_item = _LIST_RE.fullmatch(lines[i].strip())
+                if next_item is None or (next_item.group(2) is not None) != ordered:
+                    break
+                items.append(_render_inline(next_item.group(3)))
+                i += 1
+            parts.append(f'<{tag}>' + ''.join(f'<li>{s}</li>' for s in items) + f'</{tag}>')
             continue
 
         # Check if this line is a standalone image (nothing else on the line)
@@ -232,6 +283,23 @@ def _render_body(body: str, image_map: dict[str, str], *, base_dir: Path | None 
 
     _flush_paragraph()
     return "\n".join(parts)
+
+
+def plain_markdown_text(body: str) -> str:
+    """Flatten supported Markdown for publishing paths that accept plain text."""
+    from .core import strip_markdown_images
+
+    body = strip_markdown_images(body)
+    out = []
+    for line in body.splitlines():
+        line = re.sub(r'^\s*#{1,6}\s+', '', line)
+        line = re.sub(r'^\s*>\s?', '', line)
+        line = re.sub(r'^\s*(?:[-*+]\s+|\d+\.\s+)', '', line)
+        line = re.sub(r'\[([^\]]+)\]\(https?://[^)]+\)', r'\1', line)
+        line = re.sub(r'\*\*(.+?)\*\*|~~(.+?)~~|\*([^*\n]+)\*|`([^`]+)`',
+                      lambda m: next(s for s in m.groups() if s is not None), line)
+        out.append(line.rstrip())
+    return '\n'.join(out).strip()
 
 
 def render(

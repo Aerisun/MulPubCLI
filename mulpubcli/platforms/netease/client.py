@@ -13,9 +13,9 @@ from urllib.parse import urlsplit
 from PIL import Image
 from curl_cffi import CurlMime
 
-from mulpubcli.core import Article, PublishResult, content_fingerprint, content_matches, strip_markdown_images
+from mulpubcli.core import Article, PublishResult, content_fingerprint, content_matches
 from mulpubcli.http import HTTP, HTTPFailure, chrome_session, iter_cookies, load_session, save_session
-from mulpubcli.renderer import render as _render_article, _ArticleHTML
+from mulpubcli.renderer import render as _render_article, _ArticleHTML, plain_markdown_text
 from . import guard as netease_guard
 
 PLATFORM = 'netease'
@@ -410,7 +410,7 @@ class NeteaseWeb:
         self.account()
         proof = dict(evidence or {})
         if expected is not None:
-            proof.update(content_fingerprint(PLATFORM, expected.title, strip_markdown_images(expected.body)))
+            proof.update(content_fingerprint(PLATFORM, expected.title, plain_markdown_text(expected.body)))
         item = self._find(article_id)
         if not item:
             detail = self.article_detail(article_id)

@@ -1,7 +1,7 @@
 """mulpubcli.core — 共享数据模型。
 
 Article
-    title       : str          — 文章标题（从 Markdown 第一行 # 提取）
+    title       : str          — 文章标题（从首行 <!-- title: ... --> 提取）
     summary     : str | None   — 从 <!-- summary: ... --> 提取的摘要
     body        : str          — 正文 Markdown 原文（不含标题行、封面与摘要指令）
     cover       : Path         — 封面图片本地路径（必须存在）
@@ -32,6 +32,8 @@ _COVER_START_RE = re.compile(r'^\s*<!--\s*cover\s*:', re.IGNORECASE)
 # Regex to start a summary directive: <!-- summary: ... --> (may span lines to -->).
 # 摘要与本仓库 `Article.content` 的 `<!-- summary: ... -->` 特殊语法对齐。
 _SUMMARY_START_RE = re.compile(r'^\s*<!--\s*summary\s*:\s*(.*)$', re.IGNORECASE)
+_TITLE_RE = re.compile(r'^\s*<!--\s*title\s*:\s*(.*?)\s*-->\s*$', re.IGNORECASE)
+_TITLE_START_RE = re.compile(r'^\s*<!--\s*title\s*:', re.IGNORECASE)
 
 
 def _is_local(src: str) -> bool:
@@ -86,10 +88,12 @@ class Article:
             raise ValueError(f"稿件不存在：{source}")
 
         lines = source.read_text(encoding="utf-8").strip().splitlines()
-        if not lines or not lines[0].startswith("# "):
-            raise ValueError("稿件第一行须为 Markdown 一级标题（# 标题）")
-
-        title = lines[0][2:].strip()
+        if not lines:
+            raise ValueError("稿件第一行须为标题指令 <!-- title: 标题 -->")
+        title_match = _TITLE_RE.fullmatch(lines[0])
+        if title_match is None:
+            raise ValueError("稿件第一行须为标题指令 <!-- title: 标题 -->")
+        title = title_match.group(1).strip()
 
         # Extract metadata directives before any platform renders or uploads the body.
         # 封面只能来自稿件内 <!-- cover: 路径 --> 指令，无独立 --cover 参数。
@@ -100,6 +104,8 @@ class Article:
         i = 0
         while i < len(body_lines):
             line = body_lines[i]
+            if _TITLE_START_RE.match(line):
+                raise ValueError("标题指令只能出现在稿件第一行")
             m = _COVER_RE.fullmatch(line.strip())
             if m is not None:
                 if cover is not None:

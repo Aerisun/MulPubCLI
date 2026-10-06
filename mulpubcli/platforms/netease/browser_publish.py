@@ -25,6 +25,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl
 
 from mulpubcli.http import HTTPFailure
+from mulpubcli.renderer import plain_markdown_text
 
 from .client import DAILY_QUOTA_MESSAGE, is_daily_quota_rejection
 
@@ -80,6 +81,7 @@ class NeteaseBrowserPublish:
         self.dry_run = dry_run
         self.on_ready = on_ready
         self._submission_attempted = False
+        self.draft_id = ''
 
     # ─────────────────────────────────────────────
     # Playwright 自动化
@@ -121,7 +123,7 @@ class NeteaseBrowserPublish:
             dt.setData('text/plain', js);
             el.dispatchEvent(new ClipboardEvent('paste', {clipboardData: dt, bubbles: true, cancelable: true}));
             return true;
-        }""", text)
+        }""", plain_markdown_text(text))
         page.wait_for_timeout(500)
 
     def _paste_image(self, page, image_path: Path) -> None:
@@ -188,7 +190,7 @@ class NeteaseBrowserPublish:
             if kind == 'image':
                 expected.append('')
             elif kind == 'text':
-                expected[-1] += str(value)
+                expected[-1] += plain_markdown_text(str(value))
 
         def normalize(value: str) -> str:
             return re.sub(r'\s+', '', value).replace('\u200b', '')
@@ -298,7 +300,37 @@ class NeteaseBrowserPublish:
             if self.on_ready:
                 self.on_ready(preview)
             return False
+        self._wait_for_draft_save(page)
         return self._submit_editor(page)
+
+    def _wait_for_draft_save(self, page) -> None:
+        """Confirm the editor autosaved a draft before clicking public publish."""
+        responses = []
+
+        def remember_draft(response):
+            if 'publishV2.do' not in response.url:
+                return
+            request = getattr(response, 'request', None)
+            params = dict(parse_qsl(getattr(request, 'post_data', '') or ''))
+            if params.get('operation') == 'saveDraft':
+                responses.append(response)
+
+        page.on('response', remember_draft)
+        deadline = time.time() + 40  # The v4 editor autosaves about every 30 seconds.
+        while time.time() < deadline and not responses:
+            page.wait_for_timeout(500)
+        if not responses:
+            raise HTTPFailure('网易编辑器未确认草稿保存，已停止公开发布', kind='validation')
+        try:
+            body = responses[-1].text()[:600]
+            code = _publish_code(body)
+            from .client import _doc_id
+            draft_id = _doc_id(json.loads(body).get('data')) if code == 1 else ''
+        except (ValueError, TypeError) as exc:
+            raise HTTPFailure('网易草稿保存响应无效，已停止公开发布', kind='validation') from exc
+        if not draft_id:
+            raise HTTPFailure(f'网易草稿保存未确认（code={code}），已停止公开发布', kind='validation')
+        self.draft_id = draft_id
 
     def _submit_editor(self, page) -> bool:
         """Submit from the editor; either click may already finish the publication."""

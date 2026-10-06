@@ -25,7 +25,7 @@ def _article(tmp_path: Path, *, summary: str = "一句摘要") -> Article:
         (tmp_path / name).write_bytes(b"image")
     source = tmp_path / "article.md"
     source.write_text(
-        "# 标题\n\n"
+        "<!-- title: 标题 -->\n\n"
         "<!-- cover: cover.jpg -->\n\n"
         f"<!-- summary: {summary} -->\n\n"
         "开头。\n\n![第一张](one.jpg)\n\n中间。\n\n"
@@ -53,7 +53,7 @@ def test_article_extracts_metadata_without_leaking_into_body(tmp_path):
     assert "summary:" not in article.body
     assert "cover:" not in article.body
     assert "一句摘要" not in article.body
-    assert "# 标题" not in article.body
+    assert "<!-- title:" not in article.body
     _in_order(article.body, "开头。", "one.jpg", "中间。", "two.jpg", "结尾。")
 
 
@@ -74,7 +74,7 @@ def test_duplicate_or_unclosed_metadata_is_rejected(tmp_path, directive):
         (tmp_path / name).write_bytes(b"image")
     source = tmp_path / "article.md"
     source.write_text(
-        "# 标题\n<!-- cover: cover.jpg -->\n<!-- summary: 摘要 -->\n"
+        "<!-- title: 标题 -->\n<!-- cover: cover.jpg -->\n<!-- summary: 摘要 -->\n"
         f"{directive}\n正文。",
         encoding="utf-8",
     )
@@ -293,7 +293,7 @@ def test_netease_editor_blocks_interleave_images_and_text(tmp_path):
 def test_netease_always_uses_cover_as_first_body_image(tmp_path):
     (tmp_path / "cover.jpg").write_bytes(b"image")
     source = tmp_path / "article.md"
-    source.write_text("# 标题\n<!-- cover: cover.jpg -->\n开头。\n\n结尾。", encoding="utf-8")
+    source.write_text("<!-- title: 标题 -->\n<!-- cover: cover.jpg -->\n开头。\n\n结尾。", encoding="utf-8")
     images, blocks = _netease_editor_media(Article.load(source))
     assert [path.name for path in images] == ["cover.jpg"]
     assert [(kind, value.name if kind == "image" else value) for kind, value in blocks] == [
@@ -310,7 +310,7 @@ def test_netease_always_uses_cover_as_first_body_image(tmp_path):
 def test_netease_http_draft_starts_body_with_cover(tmp_path):
     (tmp_path / "cover.jpg").write_bytes(b"image")
     source = tmp_path / "article.md"
-    source.write_text("# 标题\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
+    source.write_text("<!-- title: 标题 -->\n<!-- cover: cover.jpg -->\n正文。", encoding="utf-8")
     article = Article.load(source)
     posted = {}
     client = NeteaseWeb.__new__(NeteaseWeb)
@@ -463,6 +463,67 @@ def test_netease_first_click_success_does_not_click_publish_again():
     assert publisher.submitted_id == "L8DBTPLM0556PYDT"
 
 
+def test_netease_waits_for_editor_draft_save_before_publication():
+    publisher = NeteaseBrowserPublish([], "标题", "")
+
+    class Response:
+        url = "https://mp.163.com/wemedia/article/status/api/publishV2.do"
+        request = SimpleNamespace(post_data="operation=saveDraft")
+
+        def text(self):
+            return '{"code":1,"data":"docId=L8DBTPLM0556PYDT&pkId=null"}'
+
+    class Page:
+        def on(self, event, callback):
+            assert event == "response"
+            self.callback = callback
+
+        def wait_for_timeout(self, _milliseconds):
+            self.callback(Response())
+
+    publisher._wait_for_draft_save(Page())
+    assert publisher.draft_id == "L8DBTPLM0556PYDT"
+
+
+def test_netease_publish_flow_saves_draft_before_public_click():
+    publisher = NeteaseBrowserPublish([], "标题", "")
+    calls = []
+    publisher._insert_body = lambda page: None
+    publisher._set_cover = lambda *args: None
+    publisher._verify_body_order = lambda page: None
+    publisher._wait_for_draft_save = lambda page: calls.append("draft")
+    publisher._submit_editor = lambda page: calls.append("publish") or False
+
+    class Page:
+        context = SimpleNamespace(add_cookies=lambda cookies: None)
+
+        def goto(self, *args, **kwargs):
+            pass
+
+        def wait_for_timeout(self, milliseconds):
+            pass
+
+        def wait_for_selector(self, *args, **kwargs):
+            pass
+
+        def fill(self, *args, **kwargs):
+            pass
+
+    assert publisher._perform(Page(), object(), object()) is False
+    assert calls == ["draft", "publish"]
+
+
+def test_netease_does_not_publish_without_confirmed_browser_draft(monkeypatch):
+    publisher = NeteaseBrowserPublish([], "标题", "")
+    times = iter((0, 41))
+    monkeypatch.setattr("mulpubcli.platforms.netease.browser_publish.time.time", lambda: next(times))
+    page = SimpleNamespace(on=lambda event, callback: None)
+    with pytest.raises(HTTPFailure, match="未确认草稿保存") as exc:
+        publisher._wait_for_draft_save(page)
+    assert exc.value.kind == "validation"
+    assert publisher._submission_attempted is False
+
+
 def test_netease_ambiguous_browser_result_reads_back_new_publication(tmp_path, monkeypatch):
     publisher = NeteaseBrowserPublish([], "标题", "", dest=tmp_path / "auth.json")
     snapshots = iter(({"old-id"}, {"old-id", "L8DBTPLM0556PYDT"}))
@@ -554,7 +615,7 @@ def test_netease_editor_keeps_paragraph_breaks_between_images(tmp_path):
     cover.write_bytes(b"image")
     source = tmp_path / "article.md"
     source.write_text(
-        "# 标题\n<!-- cover: cover.jpg -->\n\n"
+        "<!-- title: 标题 -->\n<!-- cover: cover.jpg -->\n\n"
         "第一段。\n\n第二段。\n\n![图](one.jpg)\n\n"
         "第三段。\n\n第四段。",
         encoding="utf-8",
@@ -610,7 +671,7 @@ def test_gallery_or_browser_publish_rejects_remote_images_before_submitting(
     (tmp_path / "cover.jpg").write_bytes(b"image")
     source = tmp_path / "article.md"
     source.write_text(
-        "# 标题\n<!-- cover: cover.jpg -->\n\n"
+        "<!-- title: 标题 -->\n<!-- cover: cover.jpg -->\n\n"
         "开头。\n\n![远程图](https://example.com/pic.jpg)\n\n结尾。",
         encoding="utf-8",
     )

@@ -15,9 +15,9 @@ from urllib.parse import urlsplit
 import requests
 from PIL import Image
 
-from mulpubcli.core import Article, PublishResult, content_fingerprint, content_matches, strip_markdown_images
+from mulpubcli.core import Article, PublishResult, content_fingerprint, content_matches
 from mulpubcli.http import HTTP, HTTPFailure, chrome_session, iter_cookies, load_session, save_session
-from mulpubcli.renderer import render as _render_article, _ArticleHTML
+from mulpubcli.renderer import render as _render_article, _ArticleHTML, plain_markdown_text
 from . import signing as zhihu_signing
 
 
@@ -254,7 +254,7 @@ class ZhihuWeb:
         if expected is not None:
             # 渲染后正文只保留可见文本与独立配图，markdown 图片语法不进入内容，
             # 指纹须基于剥离图片语法后的正文计算。
-            evidence.update(content_fingerprint('zhihu', expected.title, strip_markdown_images(expected.body)))
+            evidence.update(content_fingerprint('zhihu', expected.title, plain_markdown_text(expected.body)))
         try:
             data = self.http.json('GET', self.COLUMN + f'/api/articles/{article_id}')
         except HTTPFailure as exc:
@@ -331,7 +331,7 @@ class ZhihuWeb:
         parsed = _ArticleHTML(saved.get('content'))
         if (str(saved.get('id')) != draft_id or not media or any(not key for key in media)
                 or not content_matches('zhihu', saved.get('title', ''), parsed.text,
-                                       content_fingerprint('zhihu', article.title, strip_markdown_images(article.body)))
+                                       content_fingerprint('zhihu', article.title, plain_markdown_text(article.body)))
                 or self._image_key(saved.get('titleImage') or saved.get('title_image')) != media[0]
                 or [self._image_key(src) for src in parsed.images] != media[1:]):
             raise HTTPFailure('发表前的草稿与原稿或上传图片不一致，已停止')

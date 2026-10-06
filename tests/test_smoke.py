@@ -30,7 +30,7 @@ _im2 = _tb / "im2.jpg"; _im2.write_bytes(b"\xff\xd8\xff")
 
 def _blocks_of(md_body: str):
     p = _tb / "blocks.md"
-    p.write_text(f"# 标题\n\n<!-- cover: cover.jpg -->\n\n{md_body}", encoding="utf-8")
+    p.write_text(f"<!-- title: 标题 -->\n\n<!-- cover: cover.jpg -->\n\n{md_body}", encoding="utf-8")
     return body_content_blocks(Article.load(p))
 
 _blks = _blocks_of("首段\n\n![首图](im1.jpg)\n\n中段\n\n![尾图](im2.jpg)\n\n末段")
@@ -50,7 +50,7 @@ with tempfile.TemporaryDirectory() as tmp:
     cover.write_bytes(b"\xff\xd8\xff" + b"\x00" * 10)
     md = tmp / "art.md"
     md.write_text(
-        f"# 雾中独行\n\n<!-- cover: cover.jpg -->\n\n<!-- summary: 在浓雾与记忆之间，一个人独自走向路口 -->\n\n清晨的光线很薄，像被水洗过一样。\n\n![配图]({body_img})\n\n到了某个路口，他停下来。",
+        f"<!-- title: 雾中独行 -->\n\n<!-- cover: cover.jpg -->\n\n<!-- summary: 在浓雾与记忆之间，一个人独自走向路口 -->\n\n清晨的光线很薄，像被水洗过一样。\n\n![配图]({body_img})\n\n到了某个路口，他停下来。",
         encoding="utf-8",
     )
 
@@ -89,7 +89,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
     # Test: body without images in text lines
     md2 = tmp / "plain.md"
-    md2.write_text("# 纯文字\n\n<!-- cover: cover.jpg -->\n\n第一段\n\n第二段", encoding="utf-8")
+    md2.write_text("<!-- title: 纯文字 -->\n\n<!-- cover: cover.jpg -->\n\n第一段\n\n第二段", encoding="utf-8")
     a2 = Article.load(md2)
     assert len(a2.body_images) == 0
     html4 = render(a2, {str(cover): "https://cdn.example.com/cover.jpg"}, cover_first=True)

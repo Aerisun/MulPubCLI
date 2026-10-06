@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .core import Article, PublishResult, content_fingerprint, strip_markdown_images
+from .core import Article, PublishResult, content_fingerprint
+from .renderer import plain_markdown_text
 from .http import HTTPFailure, private_json
 
 
@@ -137,7 +138,7 @@ class ResultLedger:
                    "saved_at": now, 'reserved_at': reserved, 'tracked': True}
         payload.setdefault('content_check', content_fingerprint(platform, article.title, article.body))
         payload.setdefault('verify_check', content_fingerprint(platform, article.title,
-                                                               strip_markdown_images(article.body)))
+                                                               plain_markdown_text(article.body)))
         private_json(path, payload)
         return path
 
@@ -147,7 +148,7 @@ class ResultLedger:
             payload = self._read(path) if path.exists() else {'status': 'pending', 'platform': platform}
             proof = payload.setdefault('content_check', content_fingerprint(platform, article.title, article.body))
             payload.setdefault('verify_check', content_fingerprint(platform, article.title,
-                                                                   strip_markdown_images(article.body)))
+                                                                   plain_markdown_text(article.body)))
             if stage == 'uploaded':
                 image = remote_id if isinstance(remote_id, dict) else {'id': remote_id}
                 proof.setdefault('media', []).append(str(image['id']))
@@ -187,7 +188,7 @@ class ResultLedger:
                 if 'sha256' in original and any(original.get(key) != value for key, value in provided.items()):
                     raise ValueError('核验稿件与原提交指纹不同，停止核验')
                 proof.update(content_fingerprint(platform, article.title,
-                                                 strip_markdown_images(article.body)))
+                                                 plain_markdown_text(article.body)))
                 if platform == 'xiaohongshu':
                     from .platforms.xiaohongshu.client import image_profile, pixel_fingerprint
                     proof['media_pixels'] = [pixel_fingerprint(path) for path in article.all_images()]
