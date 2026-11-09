@@ -77,9 +77,6 @@ class NeteaseLogin:
 
     def _capture_after_login(self, page) -> bool:
         """Wait for a valid login and its related 163.com cookies to settle."""
-        from .client import SESSION_COOKIE
-
-        required = {SESSION_COOKIE, 'P_INFO', 'S_INFO'}
         previous = None
         stable = 0
         for _ in range(24):
@@ -215,7 +212,8 @@ class NeteaseLogin:
                     client.close()
             except HTTPFailure as exc:
                 return {'platform': 'netease', 'status': 'failed',
-                        'message': f'凭证已导出但核验失败：{exc}'}
+                        'message': f'凭证已导出但核验失败：{exc.user_message()}',
+                        **exc.safe_details()}
             os.replace(staged, target)
             return {'platform': 'netease', 'status': 'ok',
                     'account_id': info.get('id', ''),

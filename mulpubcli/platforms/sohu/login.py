@@ -387,7 +387,6 @@ class SohuLogin:
             dv = page.evaluate("localStorage.getItem('preview-dv-id') || ''")
         except Exception:
             dv = ''
-        sohu = jar.get('sohu.com', {})
         mp = jar.get('mp.sohu.com', {})
         sp_cm = mp.get('mp-cv', '')
         self.dv_id = dv
@@ -444,7 +443,8 @@ class SohuLogin:
                     client.close()
             except HTTPFailure as exc:
                 return {'status': 'failed', 'platform': 'sohu',
-                        'message': f'搜狐登录凭证核验失败：{exc}'}
+                        'message': f'搜狐登录凭证核验失败：{exc.user_message()}',
+                        **exc.safe_details()}
             os.replace(staged, target)
             self.account_id = info['id']
             return {'status': 'ok', 'platform': 'sohu',

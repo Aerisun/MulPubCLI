@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import io
-import re
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -41,6 +40,7 @@ DETAIL_API = MP + '/mpbp/bp/news/v4/article'
 CHANNEL_ID = 24
 CREATION_STATEMENTS = {'none': 0, 'fiction': 1, 'ai': 2,
                        'marketing': 3, 'reprint': 4, 'opinion': 5}
+AUTH_ERROR_KINDS = {1211: 'authentication_required', 1300: 'verification_required'}
 
 
 def _article_status(value) -> str:
@@ -118,20 +118,35 @@ class SohuWeb:
         """核验搜狐登录态并返回账号信息。"""
         r = self.http.request('GET', ACC_API + '?_=' + str(int(time.time() * 1000)),
                               headers={'X-Requested-With': 'XMLHttpRequest', **self._write_headers()})
+        diagnostics = {'status_code': r.status_code, 'request_method': 'GET',
+                       'request_target': ACC_API}
         try:
             payload = r.json()
         except ValueError:
-            raise HTTPFailure('搜狐返回无效 JSON，已停止', kind='invalid_response') from None
-        if payload.get('code') != 2000000:
-            raise HTTPFailure('搜狐登录态无效，需重新 mulpubcli login sohu', kind='authentication_required')
-        data = payload.get('data') or {}
-        groups = data.get('data') or []
-        accounts = [acc for group in groups for acc in (group.get('accounts') or [])
-                    if acc.get('id') is not None]
+            raise HTTPFailure('搜狐返回无效 JSON，已停止', kind='invalid_response',
+                              **diagnostics) from None
+        if not isinstance(payload, dict):
+            raise HTTPFailure('搜狐账号响应结构无效', kind='invalid_response', **diagnostics)
+        code = payload.get('code')
+        if code != 2000000:
+            kind = AUTH_ERROR_KINDS.get(
+                code, 'platform_rejected') if type(code) is int else 'invalid_response'
+            raise HTTPFailure('搜狐账号核验未通过', kind=kind, code=code, **diagnostics)
+        data = payload.get('data')
+        groups = data.get('data') if isinstance(data, dict) else None
+        if not isinstance(groups, list):
+            raise HTTPFailure('搜狐账号列表结构无效', kind='invalid_response', **diagnostics)
+        accounts = []
+        for group in groups:
+            rows = group.get('accounts') if isinstance(group, dict) else None
+            if not isinstance(rows, list) or any(not isinstance(acc, dict) for acc in rows):
+                raise HTTPFailure('搜狐账号列表结构无效', kind='invalid_response', **diagnostics)
+            accounts.extend(acc for acc in rows if acc.get('id') is not None)
         if not self.account_id:
             if len(accounts) != 1:
                 kind = 'authentication_required' if not accounts else 'account_selection_required'
-                raise HTTPFailure('搜狐未找到唯一可用账号，无法完成登录核验', kind=kind)
+                raise HTTPFailure('搜狐未找到唯一可用账号，无法完成登录核验', kind=kind,
+                                  **diagnostics)
             self.account_id = str(accounts[0]['id'])
         for acc in accounts:
             if str(acc['id']) == str(self.account_id):
@@ -144,7 +159,7 @@ class SohuWeb:
                         details[target] = value
                 return {'id': str(acc['id']), 'name': acc.get('nickName', ''),
                         'account_details': details}
-        raise HTTPFailure('搜狐未找到保存的账号', kind='account_mismatch')
+        raise HTTPFailure('搜狐未找到保存的账号', kind='account_mismatch', **diagnostics)
 
     # ─────────────────────────────────────────────
     # 图片上传（纯 HTTP）
@@ -210,7 +225,8 @@ class SohuWeb:
         try:
             self.account()
         except HTTPFailure as exc:
-            return PublishResult('failed', f'搜狐登录态核验未通过：{exc}；尚未上传', platform=PLATFORM)
+            return PublishResult('failed', '搜狐尚未提交文章、尚未上传；' + exc.user_message(),
+                                 platform=PLATFORM, verification=exc.safe_details()['kind'])
 
         submitted = False
         try:
@@ -246,9 +262,18 @@ class SohuWeb:
             if not isinstance(payload, dict):
                 return PublishResult('pending', '搜狐投稿回执格式未知；请用 verify 核验，勿重发',
                                      platform=PLATFORM, verification='unavailable')
-            if payload.get('code') != 2000000:
-                return PublishResult('failed', f"搜狐公开投稿被拒绝：{payload.get('msg') or '平台未给出原因'}",
-                                     platform=PLATFORM, verification='rejected')
+            code = payload.get('code')
+            if type(code) is not int:
+                return PublishResult('pending', '搜狐投稿回执缺少明确业务状态；请核验作品，勿重发',
+                                     platform=PLATFORM, verification='unavailable')
+            if code != 2000000:
+                kind = AUTH_ERROR_KINDS.get(code, 'platform_rejected')
+                failure = HTTPFailure('搜狐公开投稿被拒绝', kind=kind, code=code,
+                                      status_code=response.status_code,
+                                      request_method='POST', request_target=PUBLISH_API)
+                return PublishResult('failed', '搜狐公开投稿被拒绝；' + failure.user_message(),
+                                     platform=PLATFORM,
+                                     verification=kind if code in AUTH_ERROR_KINDS else 'rejected')
             data = payload.get('data')
             remote_id = (data.get('id') if isinstance(data, dict) else data)
             if not isinstance(remote_id, (str, int)) or not str(remote_id).isdigit():
@@ -266,8 +291,10 @@ class SohuWeb:
                                  platform=PLATFORM, verification='unavailable')
         except HTTPFailure as exc:
             status = 'pending' if submitted else 'failed'
-            return PublishResult(status, f'搜狐投稿过程停止：{exc}' + ('；请回读核验，勿重发' if submitted else ''),
-                                 platform=PLATFORM, verification='unavailable' if submitted else None)
+            instruction = '；请回读核验，勿重发' if submitted else '；尚未提交文章'
+            return PublishResult(status, '搜狐投稿过程停止：' + exc.user_message() + instruction,
+                                 platform=PLATFORM,
+                                 verification='unavailable' if submitted else exc.safe_details()['kind'])
 
     def list_articles(self) -> list[dict]:
         """读取搜狐图文列表，保留审核中与草稿等平台状态。"""

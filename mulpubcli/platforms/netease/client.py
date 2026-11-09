@@ -6,9 +6,7 @@
 from __future__ import annotations
 
 import re
-import time
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from PIL import Image
 from curl_cffi import CurlMime
@@ -118,8 +116,6 @@ class NeteaseWeb:
             'Referer': MP + '/wemedia/index.html',
             'Origin': MP,
         })
-        self.http.session.proxies.update({
-            'http': 'http://127.0.0.1:7890', 'https': 'http://127.0.0.1:7890'})
         self.wemedia_id = ''
         self.tname = ''
         self.path = None
@@ -173,7 +169,8 @@ class NeteaseWeb:
         return any(c.name == SESSION_COOKIE and c.value and not c.is_expired()
                    for c in iter_cookies(self.http.session))
 
-    def _checked(self, payload, *, expect_code=(1,), what='操作'):
+    def _checked(self, payload, *, expect_code=(1,), what='操作',
+                 request_method=None, request_target=None):
         if not isinstance(payload, dict):
             raise HTTPFailure(f'网易{what}响应结构变化，已停止', kind='invalid_response')
         code = payload.get('code')
@@ -181,11 +178,28 @@ class NeteaseWeb:
             raise HTTPFailure(f'网易{what}缺少明确业务状态，已停止', kind='invalid_response')
         code = int(code)
         if code not in expect_code:
-            msg = payload.get('msg') or payload.get('message') or ''
-            if what == '投稿' and is_daily_quota_rejection(str(msg)):
-                raise HTTPFailure(DAILY_QUOTA_MESSAGE, kind='limit', code=code)
-            kind = 'authentication_required' if code in (401, 8, 9, 70) else 'platform_rejected'
-            raise HTTPFailure(f'网易{what}被拒绝（code={code}' + (f'，{msg}' if msg else '') + '），已停止', kind=kind, code=code)
+            msg = payload.get("msg") or payload.get("message") or ""
+            if what == "投稿" and is_daily_quota_rejection(str(msg)):
+                raise HTTPFailure(DAILY_QUOTA_MESSAGE, kind="limit", code=code)
+            kind = (
+                "verification_required"
+                if code == 100030
+                else "authentication_required"
+                if code in (401, 8, 9, 70)
+                else "platform_rejected"
+            )
+            if code == 100030:
+                msg = "请完成网易手机号验证"
+            raise HTTPFailure(
+                f"网易{what}被拒绝（code={code}"
+                + (f"，{msg}" if msg else "")
+                + "），已停止",
+                kind=kind,
+                code=code,
+                status_code=200,
+                request_method=request_method,
+                request_target=request_target,
+            )
         return payload
 
     def account(self):
@@ -193,7 +207,8 @@ class NeteaseWeb:
             raise HTTPFailure('网易尚无有效登录 Cookie（NTESwebSI），请导入浏览器导出的网易 Cookie', kind='authentication_required')
         payload = self._checked(
             self.http.json('GET', MP + '/wemedia/navinfo.do', headers={'Referer': MP + '/wemedia/index.html'}),
-            what='账号查询')
+            what='账号查询', request_method='GET',
+            request_target='mp.163.com/wemedia/navinfo.do')
         data = payload.get('data')
         if not isinstance(data, dict):
             raise HTTPFailure('网易账号详情结构无效', kind='invalid_response')
@@ -294,7 +309,7 @@ class NeteaseWeb:
         try:
             result = self._submit(article, operation='saveDraft', checkpoint=checkpoint)
         except HTTPFailure as exc:
-            return PublishResult('pending', f'网易草稿阶段停止：{exc}', platform=PLATFORM)
+            return PublishResult('pending', f'网易草稿阶段停止：{exc.user_message()}', platform=PLATFORM)
         except Exception as exc:
             return PublishResult('pending', f'网易草稿阶段停止：{type(exc).__name__}；先核验草稿记录', platform=PLATFORM)
         if checkpoint:
@@ -307,12 +322,12 @@ class NeteaseWeb:
         try:
             token = netease_guard.load_urs_token(value=urs_token, token_file=token_file)
         except HTTPFailure as exc:
-            return PublishResult('failed', str(exc), platform=PLATFORM)
+            return PublishResult('failed', exc.user_message(), platform=PLATFORM)
         try:
             result = self._submit(article, operation='publish', urs_token=token, checkpoint=checkpoint)
         except HTTPFailure as exc:
             return PublishResult('failed' if exc.kind == 'limit' else 'pending',
-                                 f'网易发布阶段停止：{exc}', platform=PLATFORM)
+                                 f'网易发布阶段停止：{exc.user_message()}', platform=PLATFORM)
         except Exception as exc:
             return PublishResult('pending', f'网易发布阶段停止：{type(exc).__name__}；先核验发布记录', platform=PLATFORM)
         if checkpoint:
@@ -321,13 +336,16 @@ class NeteaseWeb:
 
     # ── 列表 / 回查 ─────────────────────────────────────────────────────
 
-    def _list_page(self, *, content_state: int, page_no: int = 1, size: int = 20) -> list[dict]:
-        self.account()
+    def _list_page(self, *, content_state: int, page_no: int = 1, size: int = 20,
+                   check_account: bool = True) -> list[dict]:
+        if check_account:
+            self.account()
         payload = self._checked(self.http.json(
             'POST', MP + '/wemedia/content/manage/list.do',
             data={'wemediaId': self.wemedia_id, 'pageNo': page_no, 'size': size,
                   'contentType': 1, 'contentState': content_state},
-            headers={'Referer': MP + '/wemedia/index.html'}), what='列表查询')
+            headers={'Referer': MP + '/wemedia/index.html'}), what='列表查询',
+            request_method='POST', request_target='mp.163.com/wemedia/content/manage/list.do')
         data = payload.get('data')
         if not isinstance(data, dict):
             raise HTTPFailure('网易列表结构无效', kind='invalid_response')
@@ -381,10 +399,11 @@ class NeteaseWeb:
                 break
         return 'unknown'
 
-    def _find(self, article_id: str) -> dict | None:
+    def _find(self, article_id: str, *, check_account: bool = True) -> dict | None:
         for state in (0, 1, 2, 3):
             for page_no in range(1, 51):
-                rows = self._list_page(content_state=state, page_no=page_no)
+                rows = self._list_page(content_state=state, page_no=page_no,
+                                       check_account=check_account)
                 for item in rows:
                     if _item_id(item) == article_id:
                         return item
@@ -392,57 +411,139 @@ class NeteaseWeb:
                     break
         return None
 
-    def article_detail(self, article_id: str) -> dict | None:
+    def article_detail(self, article_id: str, *, check_account: bool = True) -> dict | None:
         """Read the creator editor's per-ID post, including offline state 7."""
-        self.account()
-        payload = self._checked(self.http.json(
-            'GET', MP + '/wemedia/article/editpage.do',
-            params={'postId': article_id, 'wemediaId': self.wemedia_id,
-                    'mediaId': self.wemedia_id},
-            headers={'Referer': MP + '/wemedia/index.html'}), what='单篇详情')
-        data = payload.get('data')
-        post = data.get('post') if isinstance(data, dict) else None
+        if check_account:
+            self.account()
+        payload = self._checked(
+            self.http.json(
+                "GET",
+                MP + "/wemedia/article/editpage.do",
+                params={
+                    "postId": article_id,
+                    "wemediaId": self.wemedia_id,
+                    "mediaId": self.wemedia_id,
+                },
+                headers={"Referer": MP + "/wemedia/index.html"},
+            ),
+            what="单篇详情",
+            request_method="GET",
+            request_target="mp.163.com/wemedia/article/editpage.do",
+        )
+        data = payload.get("data")
+        post = data.get("post") if isinstance(data, dict) else None
         return post if isinstance(post, dict) else None
 
     def verify(self, article_id: str, *, expected=None, evidence=None):
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', article_id):
             raise ValueError('网易文章 ID 无效')
-        self.account()
+        phone_verification_required = False
+        try:
+            self.account()
+        except HTTPFailure as exc:
+            # navinfo 的手机号校验不代表作品读取失效。只允许此已知错误，
+            # 且必须以已保存身份和精确匹配的单篇详情重新确认作品归属。
+            if (
+                exc.kind != "verification_required"
+                or exc.code != 100030
+                or not re.fullmatch(r"\w{1,64}", self.wemedia_id)
+            ):
+                raise
+            detail = self.article_detail(article_id, check_account=False)
+            if not isinstance(detail, dict):
+                raise HTTPFailure(
+                    "网易单篇详情缺失，无法确认作品归属", kind="invalid_response",
+                    status_code=200, request_method="GET",
+                    request_target="mp.163.com/wemedia/article/editpage.do",
+                )
+            if detail.get("docid") != article_id or detail.get("wemediaId") != self.wemedia_id:
+                raise HTTPFailure(
+                    "网易单篇详情与文章编号或保存账号不一致，已停止", kind="account_mismatch",
+                    status_code=200, request_method="GET",
+                    request_target="mp.163.com/wemedia/article/editpage.do",
+                )
+            item = self._find(article_id, check_account=False)
+            if item and item.get("wemediaId") not in (None, "", self.wemedia_id):
+                raise HTTPFailure(
+                    "网易作品列表与保存账号不一致，已停止", kind="account_mismatch",
+                    status_code=200, request_method="POST",
+                    request_target="mp.163.com/wemedia/content/manage/list.do",
+                )
+            # 单篇状态优先，列表只补充分发提示等信息，不能用旧列表覆盖下线状态。
+            item = {**(item or {}), "articleId": article_id, "contentState": detail.get("postState")}
+            phone_verification_required = True
+        else:
+            item = self._find(article_id)
         proof = dict(evidence or {})
         if expected is not None:
             proof.update(content_fingerprint(PLATFORM, expected.title, plain_markdown_text(expected.body)))
-        item = self._find(article_id)
         if not item:
             detail = self.article_detail(article_id)
-            if (isinstance(detail, dict) and detail.get('docid') == article_id
-                    and detail.get('wemediaId') == self.wemedia_id
-                    and str(detail.get('postState')) in ('6', '7')):
-                return PublishResult('deleted', f'网易单篇详情状态码 {detail["postState"]}，文章已下线或删除；公开链接已失效',
-                                     platform=PLATFORM, verification='verified')
-            return PublishResult('pending', '网易列表未找到该文章，不会重发', platform=PLATFORM, verification='unavailable')
+            if (
+                isinstance(detail, dict)
+                and detail.get("docid") == article_id
+                and detail.get("wemediaId") == self.wemedia_id
+                and str(detail.get("postState")) in ("6", "7")
+            ):
+                return PublishResult(
+                    "deleted",
+                    f"网易单篇详情状态码 {detail['postState']}，文章已下线或删除；公开链接已失效",
+                    platform=PLATFORM,
+                    verification="verified",
+                )
+            return PublishResult(
+                "pending",
+                "网易列表未找到该文章，不会重发",
+                platform=PLATFORM,
+                verification="unavailable",
+            )
         state = _content_state(item)
-        if state == 'deleted':
-            return PublishResult('deleted', '网易作品列表显示文章已下线或删除；公开链接已失效',
-                                 platform=PLATFORM, verification='verified')
-        if state == 'draft':
-            return PublishResult('draft', f'网易草稿 {article_id} 已保存',
-                                 f'https://mp.163.com/subscribe_v4/index.html#/article-publish/{article_id}',
-                                 PLATFORM, 'verified')
-        if not state.startswith('published'):
-            return PublishResult('pending', '网易尚未通过要求的发布状态核验',
-                                 platform=PLATFORM, verification='unavailable')
-        restricted = '分发受限' in state
-        url = f'https://www.163.com/dy/article/{article_id}.html'
-        note = '；此文被平台限制分发' if restricted else ''
-        available = proof.get('sha256') and proof.get('media')
+        account_note = "；账号仍需完成手机号验证" if phone_verification_required else ""
+        if state == "deleted":
+            return PublishResult(
+                "deleted",
+                ("网易单篇详情显示文章已下线或删除" if phone_verification_required
+                 else "网易作品列表显示文章已下线或删除") + account_note,
+                platform=PLATFORM,
+                verification="verified",
+            )
+        if state == "draft":
+            return PublishResult(
+                "draft",
+                f"网易草稿 {article_id} 已保存{account_note}",
+                f"https://mp.163.com/subscribe_v4/index.html#/article-publish/{article_id}",
+                PLATFORM,
+                "verified",
+            )
+        if not state.startswith("published"):
+            return PublishResult(
+                "pending",
+                "网易尚未通过要求的发布状态核验" + account_note,
+                platform=PLATFORM,
+                verification="unavailable",
+            )
+        restricted = "分发受限" in state
+        url = f"https://www.163.com/dy/article/{article_id}.html"
+        note = "；此文内容分发受限" if restricted else ""
+        if phone_verification_required:
+            return PublishResult(
+                "published",
+                f"网易作品详情显示已发布{note}{account_note}；未核验公开页和完整正文",
+                url, PLATFORM, "published",
+            )
+        available = proof.get("sha256") and proof.get("media")
         if not available:
             return PublishResult('published', f'网易已发布{note}；缺少原稿或上传图片证据，未做内容比对',
                                  url, PLATFORM, 'published')
         content = item.get('content')
         if isinstance(content, str) and content:
             html = _ArticleHTML(content if '<' in content else '<p>' + content + '</p>')
-            approx_ok = (content_matches(PLATFORM, _text_of(item), html.text, proof)
-                         if (html.text.strip() and html.images) else True)
+            approx_ok = (
+                html.text.strip()
+                and html.images
+                and html.images == proof.get("media")
+                and content_matches(PLATFORM, _text_of(item), html.text, proof)
+            )
             if approx_ok:
                 return PublishResult('published', f'网易已发表且原稿核对通过{note}', url, PLATFORM, 'verified')
         # 列表接口正文可能被裁剪；正文比对不可靠时以发布状态为准，但不宣称完整核验。

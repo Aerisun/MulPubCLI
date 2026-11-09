@@ -76,7 +76,7 @@ def _load_client_raw(platform: str, store: StorageLayout, *, proxy: str | None =
 
 
 def _load_client(platform: str, store: StorageLayout, *, proxy: str | None = None,
-                 auto_renew: bool = True):
+                 auto_renew: bool = True, readback: bool = False):
     """Check Sohu/NetEase authentication before an operation, renewing when expired."""
     renewable = auto_renew and platform in ('sohu', 'netease')
     try:
@@ -88,8 +88,19 @@ def _load_client(platform: str, store: StorageLayout, *, proxy: str | None = Non
         client = _load_client_raw(platform, store, proxy=proxy)
     if not renewable:
         return client
+
+    def check_account(candidate):
+        try:
+            candidate.account()
+        except HTTPFailure as exc:
+            # Only readback may continue to verify the exact article's ownership.
+            if not (readback and platform == 'netease'
+                    and exc.kind == 'verification_required' and exc.code == 100030
+                    and re.fullmatch(r'\w{1,64}', getattr(candidate, 'wemedia_id', ''))):
+                raise
+
     try:
-        client.account()
+        check_account(client)
         return client
     except HTTPFailure as exc:
         _close(client)
@@ -101,7 +112,7 @@ def _load_client(platform: str, store: StorageLayout, *, proxy: str | None = Non
     _auto_renew_credentials(platform, store, proxy=proxy)
     client = _load_client_raw(platform, store, proxy=proxy)
     try:
-        client.account()
+        check_account(client)
         return client
     except Exception:
         _close(client)
@@ -777,14 +788,17 @@ def _probe_credential(platform: str, store: StorageLayout, *, proxy: str | None 
                                 info=info if platform != 'xiaohongshu' else None),
                 **identity}
     except HTTPFailure as exc:
+        details = exc.safe_details()
+        status = 'unreachable'
         if exc.kind in ("authentication_required", "platform_rejected", "verification_required",
                         "account_setup_required", "account_mismatch"):
-            return {"status": "needs_login", "credential_path": str(path),
-                    "message": f"登录态失效：{exc}"}
-        return {"status": "unreachable", "credential_path": str(path),
-                "message": f"登录态未知（网络或服务端暂态）：{exc}"}
-    except (FileNotFoundError, PermissionError) as exc:
-        return {"status": "needs_login", "credential_path": str(path), "message": str(exc)}
+            status = 'needs_login'
+        return {'status': status, 'credential_path': str(path),
+                'message': exc.user_message(), **details}
+    except (FileNotFoundError, PermissionError, ValueError):
+        return {'status': 'needs_login', 'credential_path': str(path),
+                'kind': 'local_state_invalid',
+                'message': '保存的登录信息无法读取或格式无效，请重新登录'}
     finally:
         _close(client)
 
@@ -1413,9 +1427,18 @@ def _netease_browser_publish(article: Article, store: StorageLayout) -> PublishR
 
 def _do_publish(platform: str, article: Article, store: StorageLayout, *,
                 proxy: str | None = None, declaration: str = 'none') -> PublishResult:
-    client = _load_client(platform, store, proxy=proxy)
+    try:
+        client = _load_client(platform, store, proxy=proxy)
+    except HTTPFailure as exc:
+        # Loading/renewing credentials cannot have submitted this article.
+        return PublishResult('failed', '尚未提交文章；' + exc.user_message(),
+                             platform=platform, verification=exc.safe_details()['kind'])
+    except (FileNotFoundError, PermissionError, ValueError):
+        return PublishResult('failed', '尚未提交文章；保存的登录凭证不可用，请重新登录',
+                             platform=platform, verification='local_state_invalid')
     ledger = ResultLedger(store.results_dir)
-    checkpoint = lambda stage, remote_id: ledger.checkpoint(platform, article, stage, remote_id)
+    def checkpoint(stage, remote_id):
+        return ledger.checkpoint(platform, article, stage, remote_id)
     try:
         if platform == 'sohu':
             return client.publish(article, checkpoint=checkpoint, declaration=declaration)
@@ -1471,13 +1494,13 @@ def _cmd_publish(args, store: StorageLayout) -> int:
         result = _do_publish(platform, article, store,
                              proxy=getattr(args, "proxy", None), declaration=declaration)
     except HTTPFailure as exc:
-        status = 'failed' if exc.kind in ('authentication_required', 'verification_required',
-                                          'account_mismatch', 'local_state_invalid') else 'pending'
-        result = PublishResult(status, str(exc), platform=platform)
-    except (FileNotFoundError, PermissionError) as exc:
-        result = PublishResult("failed", str(exc), platform=platform)
-    except Exception as exc:
-        result = PublishResult("pending", f"发布过程异常，请核验：{type(exc).__name__}", platform=platform)
+        # Preflight failures already return a definite failed result above. An
+        # exception after publish starts cannot prove that submission failed.
+        result = PublishResult('pending', exc.user_message() + '；请核验作品，勿重发',
+                               platform=platform, verification='unavailable')
+    except Exception:
+        result = PublishResult('pending', '发布过程异常，请核验作品，勿重发',
+                               platform=platform, verification='unavailable')
 
     saved = ledger.save(platform, article, result)
     record = json.loads(saved.read_text(encoding="utf-8"))
@@ -1607,7 +1630,7 @@ def _cmd_verify_one(article_id: str, platform: str | None, store: StorageLayout,
         client = None
         try:
             evidence = ledger.verification_evidence(p, str(article_id), article)
-            client = _load_client(p, store, proxy=proxy)
+            client = _load_client(p, store, proxy=proxy, readback=True)
             kwargs = {'expected': article, 'evidence': evidence}
             if p == 'toutiao':
                 kwargs['draft'] = any(str(item.get('id')) == str(article_id)
@@ -1739,7 +1762,7 @@ def _refresh_verified(platform: str, store: StorageLayout, *, proxy) -> dict:
     ledger = ResultLedger(store.results_dir)
     try:
         if saved_ids:
-            client = _load_client(platform, store, proxy=proxy)
+            client = _load_client(platform, store, proxy=proxy, readback=True)
         for item in items:
             remote_id = str(item.get('id') or '')
             if remote_id and remote_id in saved_ids:
