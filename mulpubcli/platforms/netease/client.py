@@ -309,7 +309,7 @@ class NeteaseWeb:
         try:
             result = self._submit(article, operation='saveDraft', checkpoint=checkpoint)
         except HTTPFailure as exc:
-            return PublishResult('pending', f'网易草稿阶段停止：{exc}', platform=PLATFORM)
+            return PublishResult('pending', f'网易草稿阶段停止：{exc.user_message()}', platform=PLATFORM)
         except Exception as exc:
             return PublishResult('pending', f'网易草稿阶段停止：{type(exc).__name__}；先核验草稿记录', platform=PLATFORM)
         if checkpoint:
@@ -322,12 +322,12 @@ class NeteaseWeb:
         try:
             token = netease_guard.load_urs_token(value=urs_token, token_file=token_file)
         except HTTPFailure as exc:
-            return PublishResult('failed', str(exc), platform=PLATFORM)
+            return PublishResult('failed', exc.user_message(), platform=PLATFORM)
         try:
             result = self._submit(article, operation='publish', urs_token=token, checkpoint=checkpoint)
         except HTTPFailure as exc:
             return PublishResult('failed' if exc.kind == 'limit' else 'pending',
-                                 f'网易发布阶段停止：{exc}', platform=PLATFORM)
+                                 f'网易发布阶段停止：{exc.user_message()}', platform=PLATFORM)
         except Exception as exc:
             return PublishResult('pending', f'网易发布阶段停止：{type(exc).__name__}；先核验发布记录', platform=PLATFORM)
         if checkpoint:
