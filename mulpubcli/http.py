@@ -32,16 +32,35 @@ def chrome_session(impersonate: str = 'chrome146'):
 
 def _safe_target(url: str, *, base_url: str = '') -> str | None:
     """Return a host/path diagnostic without query strings or long identifiers."""
+    if not isinstance(url, str) or not url or any(ord(c) < 32 for c in url):
+        return None
     try:
+        # Accept both full URLs and diagnostics already reduced to host/path.
+        if not base_url and not url.startswith(('/', 'http://', 'https://')):
+            if '.' not in url.split('/', 1)[0]:
+                return None
+            url = 'https://' + url
         parsed = urlsplit(urljoin(base_url, url))
+        if parsed.scheme not in ('', 'http', 'https'):
+            return None
         path = parsed.path or '/'
         path = re.sub(r'(/api/v3/account/api/login/qrcode/)[^/]+(?=/scan_info(?:/|$))',
                       r'\1<redacted>', path)
         path = re.sub(r'(/account/scan/login/)[^/]+(?=/|$)', r'\1<redacted>', path)
+        path = re.sub(
+            r'(/(?:token|access_token|password|secret|session|sessionid|authorization|cookie|api_key)/)[^/]+',
+            r'\1<redacted>', path, flags=re.IGNORECASE,
+        )
         path = re.sub(r'(?<=/)[A-Za-z0-9_-]{24,}(?=/|$)', '<redacted>', path)
         path = re.sub(r'(?<=/)\d{8,}(?=/|$)', '<redacted>', path)
+        path = '/'.join(
+            segment if segment == '<redacted>' or re.fullmatch(r'[A-Za-z0-9._-]*', segment)
+            else '<redacted>' for segment in path.split('/')
+        )
         path = path[:256]
         host = parsed.hostname
+        if host and (len(host) > 253 or not re.fullmatch(r'[a-zA-Z0-9.-]+', host)):
+            return None
     except (TypeError, ValueError):
         return None
     return f'{host}{path}' if host else path
@@ -71,6 +90,60 @@ class HTTPFailure(RuntimeError):
         if self.redirect_target is not None:
             result['redirect_target'] = self.redirect_target
         return result
+
+    def safe_details(self) -> dict:
+        """Whitelist diagnostics for services; never copy arbitrary exception text."""
+        kinds = {
+            'http_error', 'authentication_required', 'verification_required',
+            'platform_rejected', 'rate_limited', 'redirected', 'network_timeout',
+            'network_error', 'invalid_response', 'account_mismatch',
+            'account_selection_required', 'account_setup_required', 'local_state_invalid',
+            'local_environment', 'legacy_record_mismatch', 'validation', 'limit',
+        }
+        kind = self.kind if isinstance(self.kind, str) and self.kind in kinds else 'http_error'
+        result = {'kind': kind}
+        if type(self.status_code) is int and 100 <= self.status_code <= 599:
+            result['http_status'] = self.status_code
+        if ((type(self.code) is int and abs(self.code) < 10 ** 18)
+                or (isinstance(self.code, str) and re.fullmatch(r'-?[0-9]{1,18}', self.code))):
+            result['platform_code'] = self.code
+        if isinstance(self.request_method, str):
+            method = self.request_method.upper()
+            if method in {'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'}:
+                result['request_method'] = method
+        for key in ('request_target', 'redirect_target'):
+            target = _safe_target(getattr(self, key))
+            if target:
+                result[key] = target
+        return result
+
+    def user_message(self) -> str:
+        """Describe a failure with fixed wording and safe numeric codes only."""
+        details = self.safe_details()
+        reason, action = {
+            'authentication_required': ('登录态已失效', '请重新登录并核对平台作品列表'),
+            'verification_required': ('平台要求完成安全验证', '请完成验证后核对平台作品列表'),
+            'platform_rejected': ('平台拒绝了请求', '请在平台后台核对账号权限和作品状态'),
+            'rate_limited': ('平台请求过于频繁', '请稍后核对平台作品状态'),
+            'redirected': ('平台将请求转向其他页面', '请核对登录状态并完成平台验证'),
+            'network_timeout': ('平台请求超时，未取得可靠回执', '请先核对平台作品列表'),
+            'network_error': ('网络请求未取得可靠回执', '请先核对平台作品列表'),
+            'invalid_response': ('平台返回了无法识别的结果', '请先核对平台作品列表'),
+            'account_mismatch': ('平台账号与保存的账号不一致', '请核对账号后重新登录'),
+            'account_selection_required': ('平台返回多个可用账号', '请先选择发布账号'),
+            'account_setup_required': ('平台账号尚未完成开通', '请先在平台后台完成账号设置'),
+            'local_state_invalid': ('保存的登录信息无效', '请重新登录后再操作'),
+            'local_environment': ('本地运行环境不可用', '请检查运行环境后再操作'),
+            'legacy_record_mismatch': ('保存的作品记录不一致', '请先核对原作品记录'),
+            'validation': ('投稿内容未通过校验', '请检查稿件内容和图片'),
+            'limit': ('平台发布额度已用完', '请等待额度恢复后再操作'),
+        }.get(details['kind'], ('平台请求未成功', '请核对平台状态后再操作'))
+        codes = []
+        if 'http_status' in details:
+            codes.append(f"HTTP {details['http_status']}")
+        if 'platform_code' in details:
+            codes.append(f"平台代码 {details['platform_code']}")
+        return reason + (f"（{'，'.join(codes)}）" if codes else '') + '；' + action
 
     @classmethod
     def rejected(cls, status_code: int, payload=None, *, request_method=None, request_url=None,
@@ -107,7 +180,8 @@ class HTTP:
             response = self.session.request(method, url, timeout=(10, 30), allow_redirects=False, **kwargs)
         except (requests.RequestException, CurlRequestException) as exc:
             kind = 'network_timeout' if isinstance(exc, (requests.Timeout, CurlTimeout)) else 'network_error'
-            raise HTTPFailure(f'网络请求未得到可靠结果（{type(exc).__name__}），不自动重试', kind=kind) from None
+            raise HTTPFailure(f'网络请求未得到可靠结果（{type(exc).__name__}），不自动重试', kind=kind,
+                              request_method=method, request_target=_safe_target(url)) from None
         if self.on_response:
             self.on_response(response)
         if not 200 <= response.status_code < 300:
@@ -121,8 +195,8 @@ class HTTP:
                 raise HTTPFailure.rejected(
                     response.status_code,
                     payload,
-                    request_method=method if 300 <= response.status_code < 400 else None,
-                    request_url=url if 300 <= response.status_code < 400 else None,
+                    request_method=method,
+                    request_url=url,
                     redirect_location=response.headers.get('Location')
                     if 300 <= response.status_code < 400 else None,
                 )
@@ -133,8 +207,16 @@ class HTTP:
         try:
             data = response.json()
         except ValueError:
-            raise HTTPFailure('平台没有返回有效 JSON，已停止') from None
-        return self.checked(data, status_code=response.status_code)
+            raise HTTPFailure('平台没有返回有效 JSON，已停止', kind='invalid_response',
+                              status_code=response.status_code, request_method=method,
+                              request_target=_safe_target(url)) from None
+        try:
+            return self.checked(data, status_code=response.status_code)
+        except HTTPFailure as exc:
+            exc.status_code = response.status_code
+            exc.request_method = method
+            exc.request_target = _safe_target(url)
+            raise
 
     @staticmethod
     def checked(data, *, status_code=200):
