@@ -584,6 +584,36 @@ class SohuLogin:
         except Exception:
             body_text = ""
         need_human = "/clientAuth" in (page.url or "") or "短信验证" in body_text
+        # 页面壳可能先就绪、随后才跳 clientAuth。浏览器关闭前用实际导出
+        # 的设备凭证核验作品权限，不能仅依赖密码账号接口或当前路由。
+        if not need_human:
+            self._export(page)
+            try:
+                self._verify_device_session()
+            except HTTPFailure as exc:
+                if exc.kind != "verification_required" or exc.code != 1300:
+                    raise
+                if not self.allow_human:
+                    raise HTTPFailure(
+                        "搜狐要求短信授权，自动刷新已停止；旧凭证未替换，请通过交互式登录完成验证",
+                        kind="verification_required",
+                    ) from None
+                try:
+                    page.wait_for_function(
+                        "() => location.hostname === 'mp.sohu.com' && "
+                        "location.pathname.includes('/clientAuth') && "
+                        "!!document.querySelector('input[placeholder=\"请输入短信验证码\"]')",
+                        timeout=15_000,
+                    )
+                except PWTimeout:
+                    raise HTTPFailure(
+                        "搜狐要求设备验证，但短信授权页面未就绪，登录未完成",
+                        kind="verification_required",
+                    ) from None
+                need_human = True
+            else:
+                self._need_human = False
+                return False
         self._need_human = need_human
 
         # 第二步：搜狐要求设备授权时，由终端输入短信验证码。
@@ -612,10 +642,40 @@ class SohuLogin:
 
         # 暂存浏览器凭证；run() 会再用账号接口核验，通过才替换正式凭证。
         self._export(page)
+        self._verify_device_session()
         return False
+
+    def _verify_device_session(self) -> dict:
+        """Check the exact exported session before persisting it as authenticated."""
+        client = SohuWeb.load(self.destination)
+        try:
+            info = client.account()
+            if self.account_id and str(info["id"]) != str(self.account_id):
+                raise HTTPFailure(
+                    "浏览器登录的搜狐账号与原账号不一致，未替换凭证",
+                    kind="account_mismatch",
+                )
+            client.save(self.destination)
+            return info
+        finally:
+            client.close()
 
     def _export(self, page):
         """从浏览器上下文导出会话 cookie + localStorage dv-id + mp-cv → 持久化。"""
+        from playwright.sync_api import TimeoutError as PWTimeout
+
+        try:
+            page.wait_for_function(
+                "() => location.hostname === 'mp.sohu.com' && "
+                "(location.pathname.includes('/clientAuth') || "
+                "(sessionStorage.getItem('dv-id') && "
+                "localStorage.getItem('preview-sp-cm')))",
+                timeout=15_000,
+            )
+        except PWTimeout:
+            raise HTTPFailure(
+                "搜狐设备凭证未就绪，登录未完成", kind="verification_required"
+            ) from None
         cookies = page.context.cookies()
         jar = {}
         for c in cookies:
@@ -623,11 +683,18 @@ class SohuLogin:
             jar.setdefault(dom, {})[c["name"]] = c["value"]
         dv = ""
         try:
-            dv = page.evaluate("localStorage.getItem('preview-dv-id') || ''")
+            dv = page.evaluate(
+                "sessionStorage.getItem('dv-id') || localStorage.getItem('preview-dv-id') || ''"
+            )
         except Exception:
             dv = ""
         mp = jar.get("mp.sohu.com", {})
-        sp_cm = mp.get("mp-cv", "")
+        sp_cm = ""
+        try:
+            sp_cm = page.evaluate("localStorage.getItem('preview-sp-cm') || ''")
+        except Exception:
+            pass
+        sp_cm = sp_cm or mp.get("mp-cv", "")
         self.dv_id = dv
         # 保留浏览器给出的真实域名、路径、安全属性和过期时间。
         records = [
@@ -697,18 +764,7 @@ class SohuLogin:
                     "message": "浏览器未导出搜狐登录凭证",
                 }
             try:
-                client = SohuWeb.load(staged)
-                try:
-                    info = client.account()
-                    if self.account_id and str(info["id"]) != str(self.account_id):
-                        return {
-                            "status": "failed",
-                            "platform": "sohu",
-                            "message": "浏览器登录的搜狐账号与原账号不一致，未替换凭证",
-                        }
-                    client.save(staged)
-                finally:
-                    client.close()
+                info = self._verify_device_session()
             except HTTPFailure as exc:
                 return {
                     "status": "failed",

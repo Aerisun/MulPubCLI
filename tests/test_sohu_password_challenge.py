@@ -80,6 +80,7 @@ def test_password_challenge_opens_mirror_before_leaving_login(status, path, tmp_
     with (
         patch("mulpubcli.browser_mirror.BrowserMirror", return_value=mirror),
         patch.object(login, "_export") as export,
+        patch.object(login, "_verify_device_session"),
     ):
         assert login._perform(page, None, None) is False
     mirror.wait_for_verification.assert_called_once()
@@ -104,6 +105,7 @@ def test_successful_password_login_does_not_open_challenge(tmp_path):
     with (
         patch("mulpubcli.browser_mirror.BrowserMirror") as mirror,
         patch.object(login, "_export") as export,
+        patch.object(login, "_verify_device_session"),
     ):
         login._perform(page, None, None)
     mirror.assert_not_called()
@@ -116,6 +118,7 @@ def test_accepted_password_response_continues_without_page_redirect(tmp_path):
     with (
         patch("mulpubcli.platforms.sohu.login.time.monotonic", side_effect=[0, 0, 13]),
         patch.object(login, "_export") as export,
+        patch.object(login, "_verify_device_session"),
     ):
         login._perform(page, None, None)
     page.goto.assert_called_once_with(
@@ -150,6 +153,7 @@ def test_completed_challenge_notifies_caller_before_entering_editor(tmp_path):
     with (
         patch("mulpubcli.browser_mirror.BrowserMirror", return_value=mirror),
         patch.object(login, "_export"),
+        patch.object(login, "_verify_device_session"),
     ):
         login._perform(page, None, None)
 
@@ -199,6 +203,7 @@ def test_unattended_password_challenge_stops_without_mirror(tmp_path):
     with (
         patch("mulpubcli.browser_mirror.BrowserMirror") as mirror,
         patch.object(login, "_export") as export,
+        patch.object(login, "_verify_device_session"),
     ):
         with pytest.raises(HTTPFailure) as failure:
             login._perform(page, None, None)
@@ -225,6 +230,7 @@ def test_timed_out_password_challenge_preserves_original_page(tmp_path):
     with (
         patch("mulpubcli.browser_mirror.BrowserMirror", return_value=mirror),
         patch.object(login, "_export") as export,
+        patch.object(login, "_verify_device_session"),
     ):
         with pytest.raises(HTTPFailure, match="超时"):
             login._perform(page, None, None)
@@ -265,6 +271,7 @@ def test_password_challenge_rejection_after_human_input_does_not_export(tmp_path
     with (
         patch("mulpubcli.browser_mirror.BrowserMirror", return_value=mirror),
         patch.object(login, "_export") as export,
+        patch.object(login, "_verify_device_session"),
     ):
         with pytest.raises(HTTPFailure) as failure:
             login._perform(page, None, None)
@@ -287,6 +294,7 @@ def test_visible_browser_waits_in_original_login_page(tmp_path):
     with (
         patch("mulpubcli.browser_mirror.BrowserMirror") as mirror,
         patch.object(login, "_export") as export,
+        patch.object(login, "_verify_device_session"),
     ):
         login._perform(page, None, None)
     mirror.assert_not_called()
@@ -300,6 +308,7 @@ def test_missing_login_response_stops_before_editor(tmp_path):
     with (
         patch("mulpubcli.platforms.sohu.login.time.monotonic", side_effect=[0, 0, 13]),
         patch.object(login, "_export") as export,
+        patch.object(login, "_verify_device_session"),
     ):
         with pytest.raises(HTTPFailure, match="超时"):
             login._perform(page, None, None)
