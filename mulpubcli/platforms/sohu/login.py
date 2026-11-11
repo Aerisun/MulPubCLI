@@ -488,15 +488,17 @@ class SohuLogin:
 
     @staticmethod
     def _wait_for_editor_or_auth(page, *, allow_login: bool = False) -> None:
-        """等后台编辑器或设备授权页实际出现，再判断下一步。"""
+        """等后台编辑器、内容列表或设备授权页，再进入账号接口核验。"""
         from playwright.sync_api import TimeoutError as PWTimeout
 
         condition = (
             "location.pathname.includes('/clientAuth') || "
             "(location.hostname === 'mp.sohu.com' && "
-            "location.pathname.includes('/contentManagement/') && "
+            "((location.pathname === '/mpfe/v4/contentManagement/first/page' && "
+            "document.readyState !== 'loading' && document.body?.innerText.trim()) || "
+            "(location.pathname.includes('/contentManagement/') && "
             "(document.querySelector('[contenteditable=true]') || "
-            "document.querySelector('input[placeholder*=标题]')))"
+            "document.querySelector('input[placeholder*=标题]')))))"
         )
         if allow_login:
             condition += (
