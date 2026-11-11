@@ -77,7 +77,10 @@ class SohuLoginTests(unittest.TestCase):
         page.context.cookies.return_value = [{"name": "mp-cv", "value": "valid"}]
         page.url = "https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle"
         page.evaluate.return_value = ""
-        with patch.object(login, "_export") as export:
+        with (
+            patch.object(login, "_export") as export,
+            patch.object(login, "_verify_device_session"),
+        ):
             login._perform(page, None, None)
         page.fill.assert_not_called()
         export.assert_called_once_with(page)
@@ -91,7 +94,10 @@ class SohuLoginTests(unittest.TestCase):
         page.context.cookies.return_value = [{"name": "mp-cv", "value": "valid"}]
         page.url = "https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle"
         page.evaluate.return_value = ""
-        with patch.object(login, "_export"):
+        with (
+            patch.object(login, "_export"),
+            patch.object(login, "_verify_device_session"),
+        ):
             login._perform(page, None, None)
         page.context.add_cookies.assert_called_once_with(login._bootstrap_cookies)
         page.fill.assert_not_called()
@@ -115,13 +121,16 @@ class SohuLoginTests(unittest.TestCase):
         page.locator.return_value.first.click.side_effect = lambda **_kwargs: setattr(
             page, "url", "https://v4.passport.sohu.com/fe/center"
         )
-        with patch.object(login, "_export"):
+        with (
+            patch.object(login, "_export"),
+            patch.object(login, "_verify_device_session"),
+        ):
             login._perform(page, None, None)
         page.fill.assert_any_call("input[type=text]:nth-of-type(1)", "phone")
 
     def test_sms_validity_uses_server_ttl_or_two_minute_fallback(self):
-        self.assertEqual(_sms_valid_seconds({'data': {'expiresIn': 90}}, 120), 90)
-        self.assertEqual(_sms_valid_seconds({'data': {}}, 120), 120)
+        self.assertEqual(_sms_valid_seconds({"data": {"expiresIn": 90}}, 120), 90)
+        self.assertEqual(_sms_valid_seconds({"data": {}}, 120), 120)
 
     def test_sms_tty_input_times_out_and_restores_echo(self):
         master, slave = os.openpty()
@@ -237,12 +246,15 @@ class SohuLoginTests(unittest.TestCase):
                     login._solve_sms_code(page, code_timeout_s=0)
 
     def test_fast_path_does_not_add_long_fixed_sleeps(self):
-        login = SohuLogin('phone', 'password', Path('/tmp/unused-sohu.json'))
+        login = SohuLogin("phone", "password", Path("/tmp/unused-sohu.json"))
         page = Mock()
         page.context.cookies.return_value = []
         page.url = "https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle"
         page.evaluate.return_value = ""
-        with patch.object(login, "_export"):
+        with (
+            patch.object(login, "_export"),
+            patch.object(login, "_verify_device_session"),
+        ):
             login._perform(page, None, None)
         waits = [call.args[0] for call in page.wait_for_timeout.call_args_list]
         self.assertFalse(any(wait >= 4_000 for wait in waits))
@@ -250,7 +262,7 @@ class SohuLoginTests(unittest.TestCase):
         page.locator.return_value.first.click.assert_called_once()
 
     def test_sms_challenge_cannot_be_reported_as_authenticated_when_unsolved(self):
-        login = SohuLogin('phone', 'password', Path('/tmp/unused-sohu.json'))
+        login = SohuLogin("phone", "password", Path("/tmp/unused-sohu.json"))
         page = Mock()
         page.context.cookies.return_value = []
         page.url = "https://mp.sohu.com/clientAuth"
@@ -282,7 +294,7 @@ class SohuLoginTests(unittest.TestCase):
         export.assert_not_called()
 
     def test_waits_for_editor_application_before_deciding_no_sms(self):
-        login = SohuLogin('phone', 'password', Path('/tmp/unused-sohu.json'))
+        login = SohuLogin("phone", "password", Path("/tmp/unused-sohu.json"))
         page = Mock()
         page.context.cookies.return_value = []
         page.url = "https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle"
@@ -294,29 +306,47 @@ class SohuLoginTests(unittest.TestCase):
 
         def wait_for_page(predicate, **kwargs):
             nonlocal editor_checks
-            if 'contenteditable' in predicate:
+            if "contenteditable" in predicate:
                 editor_checks += 1
-                page.url = ('https://mp.sohu.com/mpfe/v4/clientAuth'
-                            if editor_checks == 1 else
-                            'https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle')
+                page.url = (
+                    "https://mp.sohu.com/mpfe/v4/clientAuth"
+                    if editor_checks == 1
+                    else "https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle"
+                )
 
         page.wait_for_function.side_effect = wait_for_page
-        with patch.object(login, '_solve_sms_code', return_value=True) as sms, \
-             patch.object(login, '_export'):
+        with (
+            patch.object(login, "_solve_sms_code", return_value=True) as sms,
+            patch.object(login, "_export"),
+            patch.object(login, "_verify_device_session"),
+        ):
             login._perform(page, None, None)
         sms.assert_called_once_with(page)
 
     def test_account_discovers_single_verified_identity(self):
-        client = SohuWeb(account_id='')
+        client = SohuWeb(account_id="")
         response = Mock()
         response.json.return_value = {
-            'code': 2000000,
-            'data': {'data': [{'accounts': [{'id': 123, 'nickName': 'Alice',
-                                            'accountTypeName': '个人',
-                                            'statusName': '账号新手期',
-                                            'homePage': 'https://mp.sohu.com/profile?id=123'}]}]},
+            "code": 2000000,
+            "data": {
+                "data": [
+                    {
+                        "accounts": [
+                            {
+                                "id": 123,
+                                "nickName": "Alice",
+                                "accountTypeName": "个人",
+                                "statusName": "账号新手期",
+                                "homePage": "https://mp.sohu.com/profile?id=123",
+                            }
+                        ]
+                    }
+                ]
+            },
         }
-        client.http.request = Mock(return_value=response)
+        protected = Mock(status_code=200)
+        protected.json.return_value = {'code': 2000000, 'data': {'news': []}}
+        client.http.request = Mock(side_effect=[response, protected])
         try:
             info = client.account()
         finally:
