@@ -114,7 +114,7 @@ def test_sohu_list_maps_review_and_public_states():
     requests = []
     def request(method, url, **kwargs):
         requests.append((method, url, kwargs.get("params"), kwargs.get("headers")))
-        return SimpleNamespace(json=lambda: {"code": 2000000, "data": {
+        return SimpleNamespace(status_code=200, json=lambda: {"code": 2000000, "data": {
             "news": [
                 {"id": 11, "title": "审核中", "status": 2, "userId": 456},
                 {"id": 12, "title": "已发布", "status": 4, "userId": 456},
@@ -152,7 +152,7 @@ def test_sohu_list_reads_tracked_article_detail_when_filtered_feed_omits_it(
             payload = {"code": 2000000, "data": {"news": {
                 "id": 42, "userId": 456, "title": article.title, "status": 7,
                 "deletedBy": 1, "postTime": 1791184144000}}}
-        return SimpleNamespace(json=lambda: payload)
+        return SimpleNamespace(status_code=200, json=lambda: payload)
 
     client.http = SimpleNamespace(request=request)
     monkeypatch.setattr(cli, "_load_client", lambda *_a, **_k: client)
