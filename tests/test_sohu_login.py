@@ -22,68 +22,102 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
 class SohuLoginTests(unittest.TestCase):
     def test_browser_profile_is_stable_and_account_scoped(self):
-        first = SohuLogin._profile_name('13522877362')
-        self.assertEqual(first, SohuLogin._profile_name('13522877362'))
-        self.assertNotEqual(first, SohuLogin._profile_name('13992649062'))
-        self.assertNotIn('13522877362', first)
+        first = SohuLogin._profile_name("13522877362")
+        self.assertEqual(first, SohuLogin._profile_name("13522877362"))
+        self.assertNotEqual(first, SohuLogin._profile_name("13992649062"))
+        self.assertNotIn("13522877362", first)
 
     def test_saved_state_bootstrap_requires_same_account_and_unexpired_cookie(self):
         with TemporaryDirectory() as root:
-            path = Path(root) / 'sohu.json'
-            path.write_text(json.dumps({
-                'account_id': 'expected', 'dv_id': 'device',
-                'cookies': [
-                    {'name': 'mp-cv', 'value': 'active', 'domain': 'mp.sohu.com',
-                     'path': '/', 'secure': True, 'expires': time.time() + 600},
-                    {'name': 'ppinf', 'value': 'session', 'domain': '.sohu.com',
-                     'path': '/', 'expires': None},
-                    {'name': 'old', 'value': 'expired', 'domain': '.sohu.com',
-                     'path': '/', 'expires': time.time() - 60},
-                ],
-            }), encoding='utf-8')
-            cookies, dv = SohuLogin._bootstrap_from_existing(path, 'expected')
-            self.assertEqual([cookie['name'] for cookie in cookies], ['mp-cv', 'ppinf'])
-            self.assertNotIn('expires', cookies[1])
-            self.assertEqual(dv, 'device')
-            self.assertEqual(SohuLogin._bootstrap_from_existing(path, 'other'), ([], ''))
+            path = Path(root) / "sohu.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "account_id": "expected",
+                        "dv_id": "device",
+                        "cookies": [
+                            {
+                                "name": "mp-cv",
+                                "value": "active",
+                                "domain": "mp.sohu.com",
+                                "path": "/",
+                                "secure": True,
+                                "expires": time.time() + 600,
+                            },
+                            {
+                                "name": "ppinf",
+                                "value": "session",
+                                "domain": ".sohu.com",
+                                "path": "/",
+                                "expires": None,
+                            },
+                            {
+                                "name": "old",
+                                "value": "expired",
+                                "domain": ".sohu.com",
+                                "path": "/",
+                                "expires": time.time() - 60,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cookies, dv = SohuLogin._bootstrap_from_existing(path, "expected")
+            self.assertEqual([cookie["name"] for cookie in cookies], ["mp-cv", "ppinf"])
+            self.assertNotIn("expires", cookies[1])
+            self.assertEqual(dv, "device")
+            self.assertEqual(
+                SohuLogin._bootstrap_from_existing(path, "other"), ([], "")
+            )
 
     def test_existing_browser_authorization_skips_password_login(self):
-        login = SohuLogin('phone', 'password', Path('/tmp/unused-sohu.json'))
+        login = SohuLogin("phone", "password", Path("/tmp/unused-sohu.json"))
         page = Mock()
-        page.context.cookies.return_value = [{'name': 'mp-cv', 'value': 'valid'}]
-        page.url = 'https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle'
-        page.evaluate.return_value = ''
-        with patch.object(login, '_export') as export:
+        page.context.cookies.return_value = [{"name": "mp-cv", "value": "valid"}]
+        page.url = "https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle"
+        page.evaluate.return_value = ""
+        with patch.object(login, "_export") as export:
             login._perform(page, None, None)
         page.fill.assert_not_called()
         export.assert_called_once_with(page)
 
     def test_existing_browser_cookie_still_restores_session_cookies(self):
-        login = SohuLogin('phone', 'password', Path('/tmp/unused-sohu.json'))
-        login._bootstrap_cookies = [{'name': 'ppinf', 'value': 'session',
-                                     'domain': '.sohu.com', 'path': '/'}]
+        login = SohuLogin("phone", "password", Path("/tmp/unused-sohu.json"))
+        login._bootstrap_cookies = [
+            {"name": "ppinf", "value": "session", "domain": ".sohu.com", "path": "/"}
+        ]
         page = Mock()
-        page.context.cookies.return_value = [{'name': 'mp-cv', 'value': 'valid'}]
-        page.url = 'https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle'
-        page.evaluate.return_value = ''
-        with patch.object(login, '_export'):
+        page.context.cookies.return_value = [{"name": "mp-cv", "value": "valid"}]
+        page.url = "https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle"
+        page.evaluate.return_value = ""
+        with patch.object(login, "_export"):
             login._perform(page, None, None)
         page.context.add_cookies.assert_called_once_with(login._bootstrap_cookies)
         page.fill.assert_not_called()
 
     def test_browser_redirect_to_public_home_falls_back_to_password_login(self):
-        login = SohuLogin('phone', 'password', Path('/tmp/unused-sohu.json'))
+        login = SohuLogin("phone", "password", Path("/tmp/unused-sohu.json"))
         page = Mock()
-        page.context.cookies.return_value = [{'name': 'mp-cv', 'value': 'old'}]
-        page.url = 'https://v4.passport.sohu.com/fe/login'
-        page.evaluate.return_value = ''
-        urls = iter(['https://mp.sohu.com/',
-                     'https://v4.passport.sohu.com/fe/login',
-                     'https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle'])
-        page.goto.side_effect = lambda *_args, **_kwargs: setattr(page, 'url', next(urls))
-        with patch.object(login, '_export'):
+        page.context.cookies.return_value = [{"name": "mp-cv", "value": "old"}]
+        page.url = "https://v4.passport.sohu.com/fe/login"
+        page.evaluate.return_value = ""
+        urls = iter(
+            [
+                "https://mp.sohu.com/",
+                "https://v4.passport.sohu.com/fe/login",
+                "https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle",
+            ]
+        )
+        page.goto.side_effect = lambda *_args, **_kwargs: setattr(
+            page, "url", next(urls)
+        )
+        page.locator.return_value.first.click.side_effect = lambda **_kwargs: setattr(
+            page, "url", "https://v4.passport.sohu.com/fe/center"
+        )
+        with patch.object(login, "_export"):
             login._perform(page, None, None)
-        page.fill.assert_any_call('input[type=text]:nth-of-type(1)', 'phone')
+        page.fill.assert_any_call("input[type=text]:nth-of-type(1)", "phone")
 
     def test_sms_validity_uses_server_ttl_or_two_minute_fallback(self):
         self.assertEqual(_sms_valid_seconds({'data': {'expiresIn': 90}}, 120), 90)
@@ -146,6 +180,23 @@ class SohuLoginTests(unittest.TestCase):
             page.wait_for_event.assert_called_once()
             page.get_by_role.assert_any_call('button', name='提交', exact=True)
 
+    def test_hosted_sms_provider_runs_only_after_send_is_confirmed(self):
+        with TemporaryDirectory() as root:
+            provider = Mock(return_value='123456')
+            login = SohuLogin('phone', 'password', Path(root) / 'sohu.json',
+                              sms_code_provider=provider)
+            page = Mock()
+            page.locator.return_value.count.return_value = 1
+            accepted = Mock(ok=True)
+            accepted.json.return_value = {'code': 2000000, 'data': {'expiresIn': 90}}
+            page.expect_response.return_value = nullcontext(SimpleNamespace(value=accepted))
+            with patch('sys.stdin.isatty', side_effect=AssertionError('should not read tty')):
+                self.assertTrue(login._solve_sms_code(page))
+            provider.assert_called_once()
+            self.assertGreater(provider.call_args.args[0], 0)
+            self.assertLessEqual(provider.call_args.args[0], 90)
+            page.get_by_role.assert_any_call('button', name='提交', exact=True)
+
     def test_headless_challenge_uses_temporary_browser_mirror(self):
         with TemporaryDirectory() as root:
             on_challenge = Mock()
@@ -189,38 +240,44 @@ class SohuLoginTests(unittest.TestCase):
         login = SohuLogin('phone', 'password', Path('/tmp/unused-sohu.json'))
         page = Mock()
         page.context.cookies.return_value = []
-        page.url = 'https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle'
-        page.evaluate.return_value = ''
-        with patch.object(login, '_export'):
+        page.url = "https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle"
+        page.evaluate.return_value = ""
+        with patch.object(login, "_export"):
             login._perform(page, None, None)
         waits = [call.args[0] for call in page.wait_for_timeout.call_args_list]
         self.assertFalse(any(wait >= 4_000 for wait in waits))
-        self.assertGreaterEqual(page.wait_for_function.call_count, 2)
+        self.assertGreaterEqual(page.wait_for_function.call_count, 1)
+        page.locator.return_value.first.click.assert_called_once()
 
     def test_sms_challenge_cannot_be_reported_as_authenticated_when_unsolved(self):
         login = SohuLogin('phone', 'password', Path('/tmp/unused-sohu.json'))
         page = Mock()
         page.context.cookies.return_value = []
-        page.url = 'https://mp.sohu.com/clientAuth'
-        page.evaluate.return_value = '短信验证'
-        with patch.object(login, '_solve_sms_code', return_value=False), \
-             patch.object(login, '_export') as export:
+        page.url = "https://mp.sohu.com/clientAuth"
+        page.evaluate.return_value = "短信验证"
+        with (
+            patch.object(login, "_solve_sms_code", return_value=False),
+            patch.object(login, "_export") as export,
+        ):
             with self.assertRaises(HTTPFailure):
                 login._perform(page, None, None)
         export.assert_not_called()
 
     def test_automatic_refresh_does_not_send_sms_or_prompt_for_code(self):
-        login = SohuLogin('phone', 'password', Path('/tmp/unused-sohu.json'),
-                          allow_human=False)
+        login = SohuLogin(
+            "phone", "password", Path("/tmp/unused-sohu.json"), allow_human=False
+        )
         page = Mock()
-        page.context.cookies.return_value = [{'name': 'mp-cv', 'value': 'valid'}]
-        page.url = 'https://mp.sohu.com/clientAuth'
-        page.evaluate.return_value = '短信验证'
-        with patch.object(login, '_solve_sms_code') as send_sms, \
-             patch.object(login, '_export') as export:
+        page.context.cookies.return_value = [{"name": "mp-cv", "value": "valid"}]
+        page.url = "https://mp.sohu.com/clientAuth"
+        page.evaluate.return_value = "短信验证"
+        with (
+            patch.object(login, "_solve_sms_code") as send_sms,
+            patch.object(login, "_export") as export,
+        ):
             with self.assertRaises(HTTPFailure) as failure:
                 login._perform(page, None, None)
-        self.assertEqual(failure.exception.kind, 'verification_required')
+        self.assertEqual(failure.exception.kind, "verification_required")
         send_sms.assert_not_called()
         export.assert_not_called()
 
@@ -228,8 +285,10 @@ class SohuLoginTests(unittest.TestCase):
         login = SohuLogin('phone', 'password', Path('/tmp/unused-sohu.json'))
         page = Mock()
         page.context.cookies.return_value = []
-        page.url = 'https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle'
-        page.evaluate.side_effect = lambda script: '短信验证' if '/clientAuth' in page.url else ''
+        page.url = "https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle"
+        page.evaluate.side_effect = (
+            lambda script: "短信验证" if "/clientAuth" in page.url else ""
+        )
 
         editor_checks = 0
 
@@ -329,29 +388,37 @@ class SohuLoginTests(unittest.TestCase):
             self.assertEqual(result['account_details']['account_status'], '正常')
             self.assertEqual(target.read_text(encoding='utf-8'), 'verified')
             client.close.assert_called_once()
-            self.assertEqual(browser.return_value.login.call_args.kwargs['wait_after_auto_ms'], 0)
-            self.assertEqual(browser.call_args.kwargs['profile_name'],
-                             SohuLogin._profile_name('phone'))
+            self.assertEqual(
+                browser.return_value.login.call_args.kwargs["wait_after_auto_ms"], 0
+            )
+            self.assertEqual(
+                browser.call_args.kwargs["profile_name"],
+                SohuLogin._profile_name("phone"),
+            )
 
     def test_auto_renew_rejects_a_different_browser_account(self):
         with TemporaryDirectory() as root:
-            target = Path(root) / 'sohu.json'
-            target.write_text('original', encoding='utf-8')
-            login = SohuLogin('phone', 'password', target, account_id='original-id')
+            target = Path(root) / "sohu.json"
+            target.write_text("original", encoding="utf-8")
+            login = SohuLogin("phone", "password", target, account_id="original-id")
 
             def browser_login(*args, **kwargs):
-                login.destination.write_text('new-session', encoding='utf-8')
-                return LoginResult(status='ok')
+                login.destination.write_text("new-session", encoding="utf-8")
+                return LoginResult(status="ok")
 
             client = Mock()
-            client.account.return_value = {'id': 'other-id', 'name': 'Other'}
-            with patch('mulpubcli.browser.PlaywrightLoginer') as browser, \
-                 patch('mulpubcli.platforms.sohu.client.SohuWeb.load', return_value=client):
+            client.account.return_value = {"id": "other-id", "name": "Other"}
+            with (
+                patch("mulpubcli.browser.PlaywrightLoginer") as browser,
+                patch(
+                    "mulpubcli.platforms.sohu.client.SohuWeb.load", return_value=client
+                ),
+            ):
                 browser.return_value.login.side_effect = browser_login
                 result = login.run()
 
-            self.assertEqual(result['status'], 'failed')
-            self.assertEqual(target.read_text(encoding='utf-8'), 'original')
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(target.read_text(encoding="utf-8"), "original")
             client.save.assert_not_called()
 
     def test_cli_reuses_valid_session_without_prompting(self):
@@ -380,49 +447,73 @@ class SohuLoginTests(unittest.TestCase):
                 code = _sohu_login(args, store)
             self.assertEqual(code, 0)
             payload = output.call_args.args[0]
-            self.assertEqual(payload['status'], 'authenticated')
-            self.assertEqual(payload['account_id'], '123')
-            self.assertEqual(payload['username'], 'Alice')
-            self.assertIn('续期凭证已刷新', payload['message'])
+            self.assertEqual(payload["status"], "authenticated")
+            self.assertEqual(payload["account_id"], "123")
+            self.assertEqual(payload["username"], "Alice")
+            self.assertIn("续期凭证已刷新", payload["message"])
 
     def test_cli_refresh_passes_saved_account_when_phone_matches(self):
         with TemporaryDirectory() as root:
             store = StorageLayout(Path(root))
-            cred = store.credentials('sohu')
+            cred = store.credentials("sohu")
             cred.parent.mkdir(parents=True, exist_ok=True)
-            cred.write_text(json.dumps({'account_id': 'original', 'cookies': []}),
-                            encoding='utf-8')
+            cred.write_text(
+                json.dumps({"account_id": "original", "cookies": []}), encoding="utf-8"
+            )
             from mulpubcli.http import private_json
-            private_json(store.login_secret('sohu'),
-                         {'phone': '13500000000', 'password': 'secret'})
-            args = SimpleNamespace(refresh=True, phone='13500000000',
-                                   password='secret', proxy=None, show_browser=False)
-            with patch('mulpubcli.platforms.sohu.login.SohuLogin') as login, \
-                 patch('mulpubcli.__main__._out'):
-                login.return_value.run.return_value = {'status': 'failed'}
-                _sohu_login(args, store)
-            self.assertEqual(login.call_args.kwargs['account_id'], 'original')
-            self.assertFalse(login.call_args.kwargs['allow_human'])
 
-    def test_cli_refresh_checks_original_account_without_reusing_other_phone_cookies(self):
+            private_json(
+                store.login_secret("sohu"),
+                {"phone": "13500000000", "password": "secret"},
+            )
+            args = SimpleNamespace(
+                refresh=True,
+                phone="13500000000",
+                password="secret",
+                proxy=None,
+                show_browser=False,
+            )
+            with (
+                patch("mulpubcli.platforms.sohu.login.SohuLogin") as login,
+                patch("mulpubcli.__main__._out"),
+            ):
+                login.return_value.run.return_value = {"status": "failed"}
+                _sohu_login(args, store)
+            self.assertEqual(login.call_args.kwargs["account_id"], "original")
+            self.assertFalse(login.call_args.kwargs["allow_human"])
+
+    def test_cli_refresh_checks_original_account_without_reusing_other_phone_cookies(
+        self,
+    ):
         with TemporaryDirectory() as root:
             store = StorageLayout(Path(root))
-            cred = store.credentials('sohu')
+            cred = store.credentials("sohu")
             cred.parent.mkdir(parents=True, exist_ok=True)
-            cred.write_text(json.dumps({'account_id': 'original', 'cookies': []}),
-                            encoding='utf-8')
+            cred.write_text(
+                json.dumps({"account_id": "original", "cookies": []}), encoding="utf-8"
+            )
             from mulpubcli.http import private_json
-            private_json(store.login_secret('sohu'),
-                         {'phone': '13500000000', 'password': 'old-secret'})
-            args = SimpleNamespace(refresh=False, phone='13900000000',
-                                   password='new-secret', proxy=None, show_browser=False)
-            with patch('mulpubcli.platforms.sohu.login.SohuLogin') as login, \
-                 patch('mulpubcli.__main__._probe_account', return_value=None), \
-                 patch('mulpubcli.__main__._out'):
-                login.return_value.run.return_value = {'status': 'failed'}
+
+            private_json(
+                store.login_secret("sohu"),
+                {"phone": "13500000000", "password": "old-secret"},
+            )
+            args = SimpleNamespace(
+                refresh=False,
+                phone="13900000000",
+                password="new-secret",
+                proxy=None,
+                show_browser=False,
+            )
+            with (
+                patch("mulpubcli.platforms.sohu.login.SohuLogin") as login,
+                patch("mulpubcli.__main__._probe_account", return_value=None),
+                patch("mulpubcli.__main__._out"),
+            ):
+                login.return_value.run.return_value = {"status": "failed"}
                 _sohu_login(args, store)
-            self.assertEqual(login.call_args.kwargs['account_id'], 'original')
-            self.assertFalse(login.call_args.kwargs['bootstrap_existing'])
+            self.assertEqual(login.call_args.kwargs["account_id"], "original")
+            self.assertFalse(login.call_args.kwargs["bootstrap_existing"])
 
     def test_cli_can_show_browser_for_manual_page_challenge(self):
         args = _build_parser().parse_args(['login', 'sohu', '--show-browser'])
