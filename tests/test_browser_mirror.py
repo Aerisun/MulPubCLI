@@ -3,16 +3,111 @@ import importlib
 import io
 import json
 import time
+import threading
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.request import urlopen
 
 from PIL import Image, ImageDraw
 from websockets.sync.client import connect
+from mulpubcli.http import HTTPFailure
 
 
 class BrowserMirrorTests(unittest.TestCase):
+    def test_sms_send_uses_same_mirror_and_keeps_existing_sent_status(self):
+        mirror = self._mirror()()
+        page = Mock()
+        listeners = {}
+        page.on.side_effect = lambda event, callback: listeners.update(
+            {event: callback}
+        )
+        response = Mock(url="https://mp.sohu.com/account/cv/send-sms-v2", ok=True)
+        response.json.return_value = {"code": 2000000}
+
+        def finish(original, *, is_complete, completed_status, **_kwargs):
+            self.assertIs(original, page)
+            self.assertEqual(completed_status, "sent")
+            listeners["response"](response)
+            return is_complete()
+
+        with patch.object(mirror, "wait_for_verification", side_effect=finish):
+            self.assertIs(mirror.wait_for_sms_send(page), response)
+        page.remove_listener.assert_called_once_with("response", listeners["response"])
+
+    def test_text_and_edit_keys_reach_original_captcha_input(self):
+        mirror = self._mirror()()
+        mirror._clip = {"x": 100, "y": 50, "width": 360, "height": 360}
+        for event in (
+            {"type": "text", "text": "A7中"},
+            {"type": "key", "key": "Backspace"},
+            {"type": "key", "key": "Enter"},
+        ):
+            parsed = mirror._valid_event(json.dumps(event))
+            self.assertIsNotNone(parsed)
+            mirror._events.put_nowait(parsed)
+        page = Mock()
+        mirror._process_events(page)
+        page.keyboard.insert_text.assert_called_once_with("A7中")
+        self.assertEqual(
+            [call.args for call in page.keyboard.press.call_args_list],
+            [("Backspace",), ("Enter",)],
+        )
+        page.mouse.move.assert_not_called()
+
+    def test_mirror_rejects_control_characters_and_browser_shortcuts(self):
+        validate = self._mirror()._valid_event
+        for event in (
+            {"type": "text", "text": "code\nscript"},
+            {"type": "text", "text": "x" * 65},
+            {"type": "text", "text": ""},
+            {"type": "key", "key": "Control+L"},
+            {"type": "key", "key": "F12"},
+        ):
+            self.assertIsNone(validate(json.dumps(event)))
+
+    def test_password_verification_streams_original_page_and_relays_input(self):
+        mirror = self._mirror()()
+        page = Mock()
+        ready = Mock()
+        completed = Mock(side_effect=[False, True])
+        with (
+            patch.object(mirror, "_capture_frame", return_value=b"captcha"),
+            patch.object(
+                mirror,
+                "_challenge_clip",
+                return_value={"x": 100, "y": 50, "width": 360, "height": 360},
+            ),
+            patch.object(mirror, "_process_events") as events,
+            patch.object(type(mirror), "url", "http://127.0.0.1/challenge/"),
+        ):
+            self.assertTrue(
+                mirror.wait_for_verification(
+                    page, is_complete=completed, on_ready=ready
+                )
+            )
+        ready.assert_called_once_with("http://127.0.0.1/challenge/")
+        events.assert_called_once_with(page)
+        self.assertEqual(mirror._frame, b"captcha")
+        self.assertEqual(mirror._status, "verified")
+
+    def test_password_verification_cancellation_stops_without_frames(self):
+        cancelled = threading.Event()
+        cancelled.set()
+        mirror = self._mirror()(cancel_event=cancelled)
+        with (
+            self.assertRaisesRegex(HTTPFailure, "取消"),
+            patch.object(mirror, "_capture_frame") as capture,
+        ):
+            mirror.wait_for_verification(Mock(), is_complete=lambda: False)
+        capture.assert_not_called()
+
+    def test_password_verification_times_out_without_reporting_success(self):
+        mirror = self._mirror()()
+        with self.assertRaisesRegex(HTTPFailure, "超时"):
+            mirror.wait_for_verification(Mock(), is_complete=lambda: False, timeout_s=0)
+        self.assertEqual(mirror._status, "waiting")
+
     def _mirror(self):
         try:
             return importlib.import_module('mulpubcli.browser_mirror').BrowserMirror

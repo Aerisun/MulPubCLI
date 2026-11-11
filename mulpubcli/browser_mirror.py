@@ -15,7 +15,24 @@ import time
 from urllib.parse import urlsplit
 
 
-_PAGE = '''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+_InputEvent = tuple[str, float, float] | tuple[str, str]
+_EDIT_KEYS = frozenset(
+    (
+        "Backspace",
+        "Delete",
+        "Enter",
+        "Tab",
+        "Escape",
+        "ArrowLeft",
+        "ArrowRight",
+        "ArrowUp",
+        "ArrowDown",
+        "Home",
+        "End",
+    )
+)
+
+_PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>搜狐页面验证</title>
 <style>
@@ -24,7 +41,7 @@ main{width:360px;max-width:100vw;margin:0;padding:0}
 #view{display:block;width:100%;height:auto;touch-action:none;
 user-select:none;-webkit-user-drag:none;cursor:grab}
 #view:active{cursor:grabbing}
-</style><main><img id="view" alt="搜狐验证码窗口" draggable="false"></main>
+</style><main><img id="view" alt="搜狐验证码窗口" draggable="false" tabindex="0"></main>
 <script>
 const base=location.pathname.endsWith('/')?location.pathname:location.pathname+'/';
 const view=document.getElementById('view'),root=document.querySelector('main');
@@ -61,25 +78,33 @@ function send(type,e){
     x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),
     y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))}));
 }
-view.addEventListener('pointerdown',e=>{e.preventDefault();dragging=true;
+view.addEventListener('pointerdown',e=>{e.preventDefault();view.focus({preventScroll:true});dragging=true;
   view.setPointerCapture(e.pointerId);send('down',e)});
 view.addEventListener('pointermove',e=>{if(!dragging)return;e.preventDefault();
   const now=performance.now();if(now-lastMove<30)return;lastMove=now;send('move',e)});
 function release(e){if(!dragging)return;e.preventDefault();dragging=false;send('up',e)}
 view.addEventListener('pointerup',release);view.addEventListener('pointercancel',release);
-</script></html>'''
+function input(message){if(socket.readyState===WebSocket.OPEN)socket.send(JSON.stringify(message))}
+view.addEventListener('keydown',e=>{
+  if(e.isComposing||e.ctrlKey||e.metaKey||e.altKey)return;
+  if(e.key.length===1){e.preventDefault();input({type:'text',text:e.key})}
+  else if(['Backspace','Delete','Enter','Tab','Escape','ArrowLeft','ArrowRight',
+    'ArrowUp','ArrowDown','Home','End'].includes(e.key)){e.preventDefault();input({type:'key',key:e.key})}
+});
+view.addEventListener('compositionend',e=>{if(e.data)input({type:'text',text:e.data.slice(0,64)})});
+view.addEventListener('paste',e=>{e.preventDefault();
+  const text=e.clipboardData.getData('text').slice(0,64);if(text)input({type:'text',text})});
+</script></html>"""
 
 
 class BrowserMirror:
     """Temporary mini page for a person to control one live Playwright page."""
 
-    def __init__(
-        self, *, port: int = 0, cancel_event: threading.Event | None = None
-    ):
+    def __init__(self, *, port: int = 0, cancel_event: threading.Event | None = None):
         self._requested_port = port
         self._cancel_event = cancel_event
         self._token = secrets.token_urlsafe(24)
-        self._events: queue.Queue[tuple[str, float, float]] = queue.Queue(maxsize=512)
+        self._events: queue.Queue[_InputEvent] = queue.Queue(maxsize=512)
         self._frame = b''
         self._frame_seq = 0
         self._frame_lock = threading.Lock()
@@ -103,14 +128,34 @@ class BrowserMirror:
         return f'http://127.0.0.1:{self.port}/t/{self._token}/'
 
     @staticmethod
-    def _valid_event(raw) -> tuple[str, float, float] | None:
+    def _valid_event(raw) -> _InputEvent | None:
         try:
             event = json.loads(raw)
-            kind, x, y = event['type'], event['x'], event['y']
-            if (kind not in ('move', 'down', 'up') or
-                    type(x) not in (int, float) or type(y) not in (int, float) or
-                    not math.isfinite(x) or not math.isfinite(y) or
-                    not (0 <= x <= 1 and 0 <= y <= 1)):
+            if event["type"] == "text":
+                value = event.get("text")
+                if (
+                    isinstance(value, str)
+                    and 0 < len(value) <= 64
+                    and value.isprintable()
+                ):
+                    return "text", value
+                return None
+            if event["type"] == "key":
+                value = event.get("key")
+                return (
+                    ("key", value)
+                    if isinstance(value, str) and value in _EDIT_KEYS
+                    else None
+                )
+            kind, x, y = event["type"], event["x"], event["y"]
+            if (
+                kind not in ("move", "down", "up")
+                or type(x) not in (int, float)
+                or type(y) not in (int, float)
+                or not math.isfinite(x)
+                or not math.isfinite(y)
+                or not (0 <= x <= 1 and 0 <= y <= 1)
+            ):
                 return None
             return kind, float(x), float(y)
         except (ValueError, KeyError, TypeError):
@@ -192,7 +237,7 @@ class BrowserMirror:
             self._frame = frame
             self._frame_seq += 1
 
-    def next_event(self) -> tuple[str, float, float] | None:
+    def next_event(self) -> _InputEvent | None:
         try:
             return self._events.get_nowait()
         except queue.Empty:
@@ -254,77 +299,135 @@ class BrowserMirror:
             event = self.next_event()
             if event is None:
                 break
-            if event[0] == 'move' and events and events[-1][0] == 'move':
+            if event[0] == "move" and events and events[-1][0] == "move":
                 # Only the latest pointer location matters when frames lag.
                 events[-1] = event
             else:
                 events.append(event)
         for event in events:
+            if event[0] == "text":
+                page.keyboard.insert_text(event[1])
+                continue
+            if event[0] == "key":
+                page.keyboard.press(event[1])
+                continue
             kind, x, y = event
-            page.mouse.move(clip['x'] + x * clip['width'],
-                            clip['y'] + y * clip['height'])
-            if kind == 'down':
+            page.mouse.move(
+                clip["x"] + x * clip["width"], clip["y"] + y * clip["height"]
+            )
+            if kind == "down":
                 self._dragging = True
                 page.mouse.down()
-            elif kind == 'up':
+            elif kind == "up":
                 self._dragging = False
                 page.mouse.up()
 
-    def wait_for_sms_send(self, page, *, on_ready=None, timeout_s: int = 120):
-        """Stream the CAPTCHA and relay input until Sohu accepts the SMS send."""
+    def wait_for_verification(
+        self,
+        page,
+        *,
+        is_complete,
+        on_ready=None,
+        timeout_s: int = 120,
+        completed_status="verified",
+    ):
+        """Relay the existing page until its caller confirms the protected step."""
         from playwright.sync_api import TimeoutError as PlaywrightTimeout
         from mulpubcli.http import HTTPFailure
 
-        pending = []
-
-        def on_response(response):
-            if '/account/cv/send-sms-v2' in response.url:
-                pending.append(response)
-
+        deadline = time.monotonic() + timeout_s
+        if self._cancel_event is not None and self._cancel_event.is_set():
+            raise HTTPFailure("搜狐登录已取消", kind="verification_required")
+        if time.monotonic() >= deadline:
+            raise HTTPFailure(
+                "等待搜狐页面验证超时，登录未完成", kind="verification_required"
+            )
         self._clip = self._challenge_clip(page)
-        page.on('response', on_response)
         try:
             for _ in range(40):
                 if self._cancel_event is not None and self._cancel_event.is_set():
-                    raise HTTPFailure('搜狐登录已取消', kind='verification_required')
+                    raise HTTPFailure("搜狐登录已取消", kind="verification_required")
+                if time.monotonic() >= deadline:
+                    raise HTTPFailure(
+                        "等待搜狐页面验证超时，登录未完成", kind="verification_required"
+                    )
+                result = is_complete()
+                if result:
+                    self._status = completed_status
+                    return result
                 frame = self._capture_frame(page, tighten=True)
-                if self._clip['width'] < 500 or self._clip['height'] < 500:
+                if self._clip["width"] < 500 or self._clip["height"] < 500:
                     break
                 page.wait_for_timeout(100)
             self.set_frame(frame)
             if on_ready is not None:
                 on_ready(self.url)
-            deadline = time.monotonic() + timeout_s
             next_frame = 0.0
             while time.monotonic() < deadline:
                 if self._cancel_event is not None and self._cancel_event.is_set():
-                    raise HTTPFailure('搜狐登录已取消', kind='verification_required')
+                    raise HTTPFailure("搜狐登录已取消", kind="verification_required")
                 self._process_events(page)
-                while pending:
-                    response = pending.pop(0)
-                    try:
-                        data = response.json()
-                    except ValueError:
-                        continue
-                    code = data.get('code') if isinstance(data, dict) else None
-                    if response.ok and code in (0, 200, 2000000):
-                        self._status = 'sent'
-                        page.wait_for_timeout(120)
-                        return response
-                    if code != 9000000:
-                        raise HTTPFailure(f'搜狐短信发送失败（code={code}）',
-                                          kind='verification_required')
+                result = is_complete()
+                if result:
+                    self._status = completed_status
+                    page.wait_for_timeout(120)
+                    return result
                 now = time.monotonic()
                 if self._connected.is_set() and now >= next_frame:
                     try:
-                        self.set_frame(self._capture_frame(
-                            page, tighten=self._clip['width'] >= 500))
+                        self.set_frame(
+                            self._capture_frame(
+                                page, tighten=self._clip["width"] >= 500
+                            )
+                        )
                     except PlaywrightTimeout:
                         pass
                     next_frame = now + (0.08 if self._dragging else 0.25)
                 page.wait_for_timeout(
-                    5 if self._dragging else 30 if self._connected.is_set() else 100)
-            raise HTTPFailure('等待页面验证和短信发送超时，登录未完成',
-                              kind='verification_required')
+                    5 if self._dragging else 30 if self._connected.is_set() else 100
+                )
+            raise HTTPFailure(
+                "等待搜狐页面验证超时，登录未完成", kind="verification_required"
+            )
         finally:
-            page.remove_listener('response', on_response)
+            if self._dragging:
+                self._dragging = False
+                page.mouse.up()
+
+    def wait_for_sms_send(self, page, *, on_ready=None, timeout_s: int = 120):
+        """Use the shared mirror until Sohu accepts the SMS send."""
+        from mulpubcli.http import HTTPFailure
+
+        pending = []
+
+        def on_response(response):
+            if "/account/cv/send-sms-v2" in response.url:
+                pending.append(response)
+
+        def accepted():
+            while pending:
+                response = pending.pop(0)
+                try:
+                    data = response.json()
+                except ValueError:
+                    continue
+                code = data.get("code") if isinstance(data, dict) else None
+                if response.ok and code in (0, 200, 2000000):
+                    return response
+                if code != 9000000:
+                    raise HTTPFailure(
+                        f"搜狐短信发送失败（code={code}）", kind="verification_required"
+                    )
+            return None
+
+        page.on("response", on_response)
+        try:
+            return self.wait_for_verification(
+                page,
+                is_complete=accepted,
+                on_ready=on_ready,
+                timeout_s=timeout_s,
+                completed_status="sent",
+            )
+        finally:
+            page.remove_listener("response", on_response)
